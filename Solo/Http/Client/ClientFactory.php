@@ -55,7 +55,7 @@ class ClientFactory
         return $this;
     }
 
-    public function get(string $uri): ResponseInterface
+    public function get(string $uri, array $data = []): ResponseInterface
     {
         $request = new Request('GET', $uri);
         return $this->sendRequest($request);
