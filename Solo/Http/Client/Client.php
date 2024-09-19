@@ -12,9 +12,9 @@ use Psr\Http\Message\ResponseInterface;
 class Client implements ClientInterface
 {
     private int $timeout;
-    private bool $sslCertificate;
+    private int $sslCertificate;
 
-    public function __construct(int $timeout = 15, bool $sslCertificate = false)
+    public function __construct(int $timeout = 15, int $sslCertificate = 0)
     {
         $this->timeout = $timeout;
         $this->sslCertificate = $sslCertificate;
@@ -36,7 +36,7 @@ class Client implements ClientInterface
             CURLOPT_TIMEOUT => $this->timeout,
             CURLOPT_HTTP_VERSION => $request->getProtocolVersion(),
             CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_SSL_VERIFYPEER => $this->sslCertificate,
+            CURLOPT_SSL_VERIFYPEER => $this->sslCertificate === 2,
             CURLOPT_SSL_VERIFYHOST => $this->sslCertificate
         ];
 

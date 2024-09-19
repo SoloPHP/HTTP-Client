@@ -10,7 +10,7 @@ class ClientFactory
 {
     private array $headers = [];
     private int $timeout = 15;
-    private bool $sslCertificate = false;
+    private int $sslCertificate = 0;
     private array $files = [];
 
     public function withHeaders(array $headers): self
@@ -37,9 +37,9 @@ class ClientFactory
         return $this;
     }
 
-    public function withSslCertificate(bool $sslCertificate): self
+    public function withSslCertificate(): self
     {
-        $this->sslCertificate = $sslCertificate;
+        $this->sslCertificate = 2;
         return $this;
     }
 
