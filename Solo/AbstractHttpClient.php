@@ -96,18 +96,25 @@ abstract class AbstractHttpClient
     }
 
     /**
-     * Creates retry middleware
+     * Creates retry middleware for handling HTTP request retries
      *
-     * @param callable $handler Request handler
-     * @return RetryMiddleware
+     * The middleware will retry requests based on:
+     * - Maximum number of retries not being exceeded
+     * - Response status being 429 (Too Many Requests) or 5xx
+     * - Using Retry-After header when available
+     * - Falling back to exponential delay between retries
+     *
+     * @param callable $handler Request handler from the handler stack
+     * @return callable Returns middleware function
      */
-    protected function createRetryMiddleware(callable $handler): RetryMiddleware
+    protected function createRetryMiddleware(callable $handler): callable
     {
-        return new RetryMiddleware(
-            $this->createDecider(),
-            $handler,
-            $this->createDelay()
-        );
+        $decider = $this->createDecider();
+        $delay = $this->createDelay();
+
+        return function (callable $handler) use ($decider, $delay) {
+            return new RetryMiddleware($decider, $handler, $delay);
+        };
     }
 
     /**
