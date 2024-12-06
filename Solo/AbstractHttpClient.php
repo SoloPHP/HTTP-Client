@@ -50,7 +50,7 @@ abstract class AbstractHttpClient
     /**
      * Get the base URL for the API
      */
-    abstract protected function getBaseUrl(): string;
+    abstract public function getBaseUrl(): string;
 
     /**
      * Handles HTTP client method calls
