@@ -131,7 +131,7 @@ abstract class AbstractHttpClient
         return function (
             int               $retries,
             RequestInterface  $request,
-            ResponseInterface $response = null
+            ?ResponseInterface $response = null
         ) {
             return $retries < $this->maxRetries &&
                 ($response && ($response->getStatusCode() === 429 || $response->getStatusCode() >= 500));
@@ -147,7 +147,7 @@ abstract class AbstractHttpClient
      */
     protected function createDelay(): callable
     {
-        return function (int $retries, ResponseInterface $response = null) {
+        return function (int $retries, ?ResponseInterface $response = null) {
             if ($response && $response->hasHeader('Retry-After')) {
                 return (int)$response->getHeaderLine('Retry-After') * 1000;
             }
