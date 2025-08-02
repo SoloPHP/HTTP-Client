@@ -149,9 +149,9 @@ $client->withLogging(function($message) {
 });
 
 // PSR-3 Logger integration
-use Solo\Logger;
+use Psr\Log\LoggerInterface;
 
-$logger = new Logger('/path/to/http.log');
+$logger = new YourPSR3Logger(); // Any PSR-3 compatible logger
 $client->withLogging($logger); // Automatically uses info level
 ```
 
@@ -243,6 +243,7 @@ composer cs-fix
 
 - PHP 8.1 or higher
 - Guzzle HTTP 7.9 or higher
+- PSR-3 Logger (optional, for logging functionality)
 
 ## License
 
