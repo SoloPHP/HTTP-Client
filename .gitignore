@@ -1,7 +1,37 @@
 !.gitignore
-vendor
+vendor/
 composer.lock
-example
-.idea
+example/
+.idea/
 .DS_Store
+Thumbs.db
+
+# PHP
+*.log
+*.cache
+.phpunit.result.cache
+.phpunit.cache/
+
+# Coverage
+coverage/
+*.clover
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
