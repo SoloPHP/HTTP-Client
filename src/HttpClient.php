@@ -9,6 +9,7 @@ use GuzzleHttp\Exception\GuzzleException;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Promise\PromiseInterface;
+use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Log\LogLevel;
 
@@ -211,7 +212,12 @@ class HttpClient
     private function createRetryMiddleware(): callable
     {
         return Middleware::retry(
-            function (int $retries, ?\Throwable $exception = null, ?ResponseInterface $response = null) {
+            function (
+                int $retries,
+                RequestInterface $request,
+                ?ResponseInterface $response = null,
+                ?\Throwable $exception = null
+            ) {
                 if ($retries >= $this->maxRetries) {
                     return false;
                 }
@@ -227,7 +233,7 @@ class HttpClient
 
                 return false;
             },
-            function (int $retries, ?ResponseInterface $response = null) {
+            function (int $retries, ?ResponseInterface $response = null, ?RequestInterface $request = null) {
                 if ($response && $response->hasHeader('Retry-After')) {
                     return (int) $response->getHeaderLine('Retry-After') * 1000;
                 }
