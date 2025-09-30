@@ -13,7 +13,6 @@ use GuzzleHttp\Promise\PromiseInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Log\LoggerInterface;
-use Psr\Log\LogLevel;
 
 class HttpClient
 {
@@ -59,7 +58,7 @@ class HttpClient
      */
     public function withHeaders(array $headers): self
     {
-        /** @var array<string, string> */
+        /** @var array<string, string> $existingHeaders */
         $existingHeaders = $this->config['headers'] ?? [];
         $this->config['headers'] = array_merge($existingHeaders, $headers);
         $this->buildClient();
@@ -88,6 +87,7 @@ class HttpClient
 
     /**
      * @param LoggerInterface|callable|null $logger
+     * @return self
      */
     public function withLogging(LoggerInterface|callable|null $logger = null): self
     {
@@ -164,6 +164,7 @@ class HttpClient
     }
 
     /**
+     * @param string $name
      * @param array<int, mixed> $arguments
      * @return mixed
      */
@@ -270,7 +271,7 @@ class HttpClient
 
                 return false;
             },
-            function (int $retries, ?ResponseInterface $response = null, ?RequestInterface $request = null) {
+            function (int $retries, ?ResponseInterface $response = null) {
                 if ($response && $response->hasHeader('Retry-After')) {
                     return (int) $response->getHeaderLine('Retry-After') * 1000;
                 }
