@@ -1,6 +1,20 @@
-# PHP HTTP Client With Retry
+# Solo HTTP Client
 
-A flexible HTTP client wrapper with automatic retry functionality for handling rate limits and server errors.
+[![Latest Version on Packagist](https://img.shields.io/packagist/v/solophp/http-client.svg)](https://packagist.org/packages/solophp/http-client)
+[![License](https://img.shields.io/packagist/l/solophp/http-client.svg)](https://github.com/solophp/http-client/blob/main/LICENSE)
+[![PHP Version](https://img.shields.io/packagist/php-v/solophp/http-client.svg)](https://packagist.org/packages/solophp/http-client)
+
+A simple and elegant PSR-18 HTTP client built on top of Guzzle with fluent API.
+
+## Features
+
+- **PSR-18 Compliant**: Implements PSR-18 HTTP Client Interface
+- **Fluent API**: Chain methods for easy configuration
+- **Built-in Retry Logic**: Automatic retry with exponential backoff
+- **Logging Support**: Built-in request/response logging
+- **JSON Support**: Easy JSON request/response handling
+- **Async Support**: Asynchronous request methods
+- **Middleware Support**: Extensible with custom middleware
 
 ## Installation
 
@@ -8,136 +22,240 @@ A flexible HTTP client wrapper with automatic retry functionality for handling r
 composer require solophp/http-client
 ```
 
-## Features
-
-- Automatic retry on rate limits (429) and server errors (5xx)
-- Configurable maximum retry attempts
-- Respects Retry-After headers
-- Exponential backoff strategy
-- JSON response handling
-- Based on Guzzle HTTP client
-- Fluent interface
-
-## Usage
-
-### Basic Usage
+## Quick Start
 
 ```php
-use App\YourApiClient;
+use Solo\HttpClient\HttpClient;
 
-$client = new YourApiClient();
-$response = $client->get('endpoint');
+// Create client
+$client = HttpClient::create('https://api.example.com')
+    ->timeout(30)
+    ->withHeaders(['Content-Type' => 'application/json'])
+    ->withToken('your-api-token')
+    ->retry(3, 1000);
+
+// Make requests
+$response = $client->get('/users');
+$users = $response->json();
+
+$response = $client->post('/users', [
+    'json' => [
+        'name' => 'John Doe',
+        'email' => 'john@example.com'
+    ]
+]);
 ```
 
-### With Custom Retries
+## Basic Usage
+
+### Creating a Client
 
 ```php
-$client = new YourApiClient();
-$client->setMaxRetries(5);
-$response = $client->get('endpoint');
+// Simple client
+$client = new HttpClient('https://api.example.com');
+
+// With configuration
+$client = new HttpClient('https://api.example.com', [
+    'timeout' => 30,
+    'headers' => ['User-Agent' => 'MyApp/1.0']
+]);
+
+// Using fluent API
+$client = HttpClient::create('https://api.example.com')
+    ->timeout(60)
+    ->withHeaders(['X-Custom' => 'value']);
 ```
 
-### Creating Your API Client
+### Making Requests
 
 ```php
-use Solo\AbstractHttpClient;
+// GET request
+$response = $client->get('/users');
 
-class YourApiClient extends AbstractHttpClient
-{
-    public function __construct()
-    {
-        $this->setClient([
-            'base_uri' => $this->getBaseUrl(),
-            'headers' => [
-                'Accept' => 'application/json'
-            ]
-        ]);
-    }
+// POST with JSON data
+$response = $client->post('/users', [
+    'json' => [
+        'name' => 'John',
+        'email' => 'john@example.com'
+    ]
+]);
 
-    protected function getBaseUrl(): string 
-    {
-        return 'https://api.example.com';
-    }
+// PUT request
+$response = $client->put('/users/1', [
+    'json' => [
+        'name' => 'John Updated'
+    ]
+]);
+
+// PATCH request
+$response = $client->patch('/users/1', [
+    'json' => [
+        'email' => 'john.updated@example.com'
+    ]
+]);
+
+// DELETE request
+$response = $client->delete('/users/1');
+
+// With custom headers and JSON data
+$response = $client->post('/users', [
+    'json' => ['name' => 'John'],
+    'headers' => ['X-Custom' => 'header']
+]);
+```
+
+### Working with Responses
+
+```php
+$response = $client->get('/users/1');
+
+// Check status
+if ($response->successful()) {
+    $user = $response->json();
+    echo $user['name'];
 }
+
+// Get specific JSON value
+$name = $response->json('name');
+$email = $response->json('profile.email');
+
+// Get headers
+$contentType = $response->header('Content-Type');
+$allHeaders = $response->headers();
+
+// Get raw body
+$body = $response->body();
 ```
 
-### Available HTTP Methods
-
-All standard HTTP methods are supported:
-
-- GET: `$client->get($uri, $options)`
-- POST: `$client->post($uri, $options)`
-- PUT: `$client->put($uri, $options)`
-- PATCH: `$client->patch($uri, $options)`
-- DELETE: `$client->delete($uri, $options)`
-- HEAD: `$client->head($uri, $options)`
-- OPTIONS: `$client->options($uri, $options)`
-
-Each method also has an async version:
-
-- `$client->getAsync($uri, $options)`
-- `$client->postAsync($uri, $options)`
-- etc.
-
-## Configuration
-
-### Retry Settings
-
-By default, the client will:
-- Retry up to 3 times
-- Use exponential backoff (1s, 2s, 4s, ...)
-- Respect Retry-After headers if present
-- Retry on HTTP 429 (Too Many Requests) and 5xx errors
-
-You can customize the number of retries:
+### Authentication
 
 ```php
-$client->setMaxRetries(5); // Set maximum 5 retries
+// Bearer token
+$client->withToken('your-api-token');
+
+// Custom token type
+$client->withToken('your-token', 'Custom');
+
+// Basic auth
+$client->withBasicAuth('username', 'password');
 ```
 
-### Guzzle Options
-
-You can pass any Guzzle client options when initializing your client:
+### Retry Logic
 
 ```php
-class YourApiClient extends AbstractHttpClient
-{
-    public function __construct()
-    {
-        $this->setClient([
-            'base_uri' => $this->getBaseUrl(),
-            'timeout' => 30,
-            'headers' => [
-                'Accept' => 'application/json',
-                'Authorization' => 'Bearer your-token'
-            ]
-        ]);
-    }
-}
+$client->retry(3, 1000); // 3 retries, 1 second delay
+
+// The client will automatically retry on:
+// - Network exceptions
+// - 429 (Too Many Requests)
+// - 5xx server errors
+```
+
+### Logging
+
+```php
+// Default logging (to error_log)
+$client->withLogging();
+
+// Custom callable logger
+$client->withLogging(function($message) {
+    file_put_contents('http.log', $message . PHP_EOL, FILE_APPEND);
+});
+
+// PSR-3 Logger integration
+use Psr\Log\LoggerInterface;
+
+$logger = new YourPSR3Logger(); // Any PSR-3 compatible logger
+$client->withLogging($logger); // Automatically uses info level
+```
+
+### Async Requests
+
+```php
+// Async GET
+$promise = $client->getAsync('/users');
+$response = $promise->wait();
+
+// Async POST
+$promise = $client->postAsync('/users', ['json' => ['name' => 'John']]);
+$response = $promise->wait();
+```
+
+### Custom Requests
+
+```php
+// Custom method with options
+$response = $client->request('POST', '/custom', [
+    'json' => ['data' => 'value'],
+    'headers' => ['X-Custom' => 'header'],
+    'timeout' => 10
+]);
+
+// Async custom request
+$promise = $client->requestAsync('PUT', '/custom', [
+    'json' => ['data' => 'value']
+]);
 ```
 
 ## Error Handling
 
-The client will throw exceptions in these cases:
-
-- `RuntimeException`: When an HTTP request fails
-- `BadMethodCallException`: When trying to call a non-existent method
-
-Example:
-
 ```php
 try {
-    $response = $client->get('endpoint');
+    $response = $client->get('/users');
+    
+    if ($response->clientError()) {
+        // Handle 4xx errors
+        echo "Client error: " . $response->status();
+    } elseif ($response->serverError()) {
+        // Handle 5xx errors
+        echo "Server error: " . $response->status();
+    }
 } catch (\RuntimeException $e) {
-    // Handle request error
-    echo $e->getMessage();
+    // Handle network/connection errors
+    echo "Request failed: " . $e->getMessage();
 }
+```
+
+## Advanced Usage
+
+### Accessing Guzzle Client
+
+```php
+$guzzleClient = $client->getClient();
+// Use Guzzle client directly for advanced features
+```
+
+### Custom Configuration
+
+```php
+$client = new HttpClient('https://api.example.com', [
+    'timeout' => 30,
+    'connect_timeout' => 10,
+    'http_errors' => false,
+    'verify' => false, // Disable SSL verification (not recommended for production)
+    'proxy' => 'http://proxy.example.com:8080'
+]);
+```
+
+## Development
+
+```bash
+# Run code style check
+composer cs
+
+# Fix code style
+composer cs-fix
+
+# Run static analysis
+composer phpstan
 ```
 
 ## Requirements
 
 - PHP 8.1 or higher
-- Guzzle 7.8 or higher
+- Guzzle HTTP 7.9 or higher
+- PSR-3 Logger (optional, for logging functionality)
 
 ## License
-MIT
+
+MIT License - see LICENSE file for details.
