@@ -13,6 +13,7 @@ A simple and elegant PSR-18 HTTP client built on top of Guzzle with fluent API.
 - **Built-in Retry Logic**: Automatic retry with exponential backoff
 - **Logging Support**: Built-in request/response logging
 - **JSON Support**: Easy JSON request/response handling
+- **Multipart/Form-Data**: File uploads and form submissions
 - **Async Support**: Asynchronous request methods
 - **Middleware Support**: Extensible with custom middleware
 
@@ -101,6 +102,75 @@ $response = $client->delete('/users/1');
 $response = $client->post('/users', [
     'json' => ['name' => 'John'],
     'headers' => ['X-Custom' => 'header']
+]);
+```
+
+### Multipart/Form-Data Requests
+
+```php
+// Simple form fields
+$response = $client->postMultipart('/upload', [
+    'name' => 'John Doe',
+    'email' => 'john@example.com',
+    'age' => '30'
+]);
+
+// Upload file
+$response = $client->postMultipart('/upload', [
+    'name' => 'John Doe',
+    'avatar' => [
+        'path' => '/path/to/avatar.jpg'
+    ]
+]);
+
+// Upload file with custom filename and MIME type
+$response = $client->postMultipart('/upload', [
+    'name' => 'John Doe',
+    'document' => [
+        'path' => '/path/to/document.pdf',
+        'filename' => 'my-document.pdf',
+        'mime_type' => 'application/pdf'
+    ]
+]);
+
+// Multiple files and fields
+$response = $client->postMultipart('/upload', [
+    'title' => 'My Photos',
+    'description' => 'Vacation photos',
+    'photo1' => [
+        'path' => '/path/to/photo1.jpg',
+        'filename' => 'beach.jpg'
+    ],
+    'photo2' => [
+        'path' => '/path/to/photo2.jpg',
+        'filename' => 'sunset.jpg'
+    ]
+]);
+
+// PUT and PATCH also available
+$response = $client->putMultipart('/users/1', [
+    'name' => 'Updated Name',
+    'avatar' => ['path' => '/path/to/new-avatar.jpg']
+]);
+
+$response = $client->patchMultipart('/users/1', [
+    'avatar' => ['path' => '/path/to/avatar.jpg']
+]);
+
+// Advanced: Using native Guzzle options
+$response = $client->post('/upload', [
+    'multipart' => [
+        [
+            'name' => 'field_name',
+            'contents' => 'field_value'
+        ],
+        [
+            'name' => 'file',
+            'contents' => fopen('/path/to/file.jpg', 'r'),
+            'filename' => 'photo.jpg',
+            'headers' => ['Content-Type' => 'image/jpeg']
+        ]
+    ]
 ]);
 ```
 

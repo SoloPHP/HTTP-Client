@@ -108,6 +108,92 @@ class HttpClient
     }
 
     /**
+     * @param array<string, mixed> $data
+     */
+    public function postMultipart(string $uri, array $data): HttpResponse
+    {
+        $multipart = $this->buildMultipartData($data);
+        return $this->request('POST', $uri, ['multipart' => $multipart]);
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    public function putMultipart(string $uri, array $data): HttpResponse
+    {
+        $multipart = $this->buildMultipartData($data);
+        return $this->request('PUT', $uri, ['multipart' => $multipart]);
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     */
+    public function patchMultipart(string $uri, array $data): HttpResponse
+    {
+        $multipart = $this->buildMultipartData($data);
+        return $this->request('PATCH', $uri, ['multipart' => $multipart]);
+    }
+
+    /**
+     * @param array<string, mixed> $data
+     * @return array<int, array<string, mixed>>
+     */
+    private function buildMultipartData(array $data): array
+    {
+        $multipart = [];
+
+        foreach ($data as $name => $value) {
+            if (is_array($value) && isset($value['path'])) {
+                /** @var array<string, mixed> $value */
+                $multipart[] = $this->buildFileMultipart($name, $value);
+            } else {
+                $multipart[] = [
+                    'name' => $name,
+                    'contents' => $value
+                ];
+            }
+        }
+
+        return $multipart;
+    }
+
+    /**
+     * @param array<string, mixed> $fileData
+     * @return array<string, mixed>
+     */
+    private function buildFileMultipart(string $name, array $fileData): array
+    {
+        if (!isset($fileData['path']) || !is_string($fileData['path'])) {
+            throw new \InvalidArgumentException('File path must be a string');
+        }
+
+        $path = $fileData['path'];
+        $filename = isset($fileData['filename']) && is_string($fileData['filename'])
+            ? $fileData['filename']
+            : basename($path);
+        $mimeType = isset($fileData['mime_type']) && is_string($fileData['mime_type'])
+            ? $fileData['mime_type']
+            : null;
+
+        $resource = @fopen($path, 'r');
+        if ($resource === false) {
+            throw new \RuntimeException("Unable to open file: {$path}");
+        }
+
+        $multipart = [
+            'name' => $name,
+            'contents' => $resource,
+            'filename' => $filename
+        ];
+
+        if ($mimeType !== null) {
+            $multipart['headers'] = ['Content-Type' => $mimeType];
+        }
+
+        return $multipart;
+    }
+
+    /**
      * @param array<string, mixed> $options
      */
     public function get(string $uri, array $options = []): HttpResponse
