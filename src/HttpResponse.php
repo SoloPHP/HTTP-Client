@@ -9,8 +9,9 @@ use Psr\Http\Message\ResponseInterface;
 class HttpResponse
 {
     private readonly ResponseInterface $response;
-    /** @var array<string, mixed>|null */
-    private ?array $jsonData = null;
+    private ?string $body = null;
+    private bool $jsonDecoded = false;
+    private mixed $jsonData = null;
 
     public function __construct(ResponseInterface $response)
     {
@@ -44,32 +45,46 @@ class HttpResponse
         return $this->status() >= 500;
     }
 
+    /**
+     * Seekable bodies are re-read on each call; only non-seekable ones (which can be read once)
+     * are cached, so large responses are not kept in memory twice.
+     */
     public function body(): string
     {
-        return (string) $this->response->getBody();
+        if ($this->body !== null) {
+            return $this->body;
+        }
+
+        $stream = $this->response->getBody();
+        $contents = (string) $stream;
+        if (!$stream->isSeekable()) {
+            $this->body = $contents;
+        }
+
+        return $contents;
     }
 
     /**
-     * @return array<string, mixed>|mixed|ResponseInterface
+     * Decoded JSON body (array, scalar or null). Returns null when the body is not valid JSON,
+     * so checks like `if ($response->json('allowed'))` fail closed.
+     * With $key ("a.b.c"), returns the nested value or null.
      */
     public function json(?string $key = null): mixed
     {
-        if ($this->jsonData === null) {
-            $contents = $this->body();
-            /** @var array<string, mixed>|null */
-            $decoded = json_decode($contents, true);
-            $this->jsonData = $decoded;
-
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                return $this->response;
+        if (!$this->jsonDecoded) {
+            $this->jsonDecoded = true;
+            try {
+                $this->jsonData = json_decode($this->body(), true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException) {
+                // Invalid JSON stays null, so checks like `if ($response->json('allowed'))` fail closed.
             }
         }
 
-        if ($key !== null && is_array($this->jsonData)) {
-            return $this->getNestedValue($this->jsonData, $key);
+        if ($key === null) {
+            return $this->jsonData;
         }
 
-        return $this->jsonData;
+        return is_array($this->jsonData) ? $this->getNestedValue($this->jsonData, $key) : null;
     }
 
     public function header(string $name): ?string
@@ -93,8 +108,7 @@ class HttpResponse
     }
 
     /**
-     * @param array<string, mixed> $data
-     * @return mixed
+     * @param array<array-key, mixed> $data
      */
     private function getNestedValue(array $data, string $key): mixed
     {
