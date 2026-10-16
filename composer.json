@@ -1,7 +1,7 @@
 {
   "name": "solophp/http-client",
   "type": "library",
-  "description": "PSR-18 HTTP client",
+  "description": "Immutable PSR-18 HTTP client built on Guzzle: fluent API, safe retries, origin-bound credentials and redacted logs.",
   "keywords": [
     "psr-18",
     "php",
