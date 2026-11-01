@@ -40,7 +40,13 @@
     "test-coverage": "phpunit --coverage-html coverage",
     "cs": "phpcs --standard=PSR12 src/ tests/",
     "cs-fix": "phpcbf --standard=PSR12 src/ tests/",
-    "phpstan": "phpstan analyse src --level=max"
+    "phpstan": "phpstan analyse src --level=max",
+    "check": [
+      "@composer validate --strict",
+      "@test",
+      "@phpstan",
+      "@cs"
+    ]
   },
   "minimum-stability": "stable",
   "prefer-stable": true
