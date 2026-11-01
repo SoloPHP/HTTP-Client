@@ -42,7 +42,7 @@ final class Psr18Test extends TestCase
         $request = new Request('GET', 'https://api.test/');
 
         try {
-            $this->client([self::connectError(7)])->sendRequest($request);
+            $this->client([self::connectError()])->sendRequest($request);
             self::fail('Expected exception');
         } catch (NetworkExceptionInterface $e) {
             self::assertInstanceOf(\RuntimeException::class, $e);
@@ -70,7 +70,7 @@ final class Psr18Test extends TestCase
     public function testAsyncErrorsAreWrappedLikeSyncOnes(): void
     {
         $this->expectException(NetworkException::class);
-        $this->client([self::connectError(7)])->getAsync('/')->wait();
+        $this->client([self::connectError()])->getAsync('/')->wait();
     }
 
     public function testAsyncResponsesAreWrapped(): void

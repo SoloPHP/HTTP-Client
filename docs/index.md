@@ -31,9 +31,9 @@ features:
     details: Only File objects become files, so forwarded form data such as avatar[path]=/etc/passwd stays text. Names are percent-encoded and cannot inject part headers.
   - icon: 🕶️
     title: Redacted logs and errors
-    details: Query values and URI credentials are masked in log lines and exception messages, path secrets after withRedaction(). The whole exception chain is safe to log.
+    details: Query values and URI credentials are masked in log lines and exception messages, path secrets after withRedaction(). The whole exception chain is safe to log, and secrets stay out of stack traces.
   - icon: 📮
-    title: PSR-18 on Guzzle
+    title: PSR-18 on Guzzle 8
     details: Implements ClientInterface with PSR-18 exceptions. Guzzle options, middleware, handlers and promises keep working, and HTTP error statuses are returned, not thrown.
 ---
 
@@ -77,7 +77,7 @@ for credentials, retries, uploads, logging and errors.
 
 ## Installation
 
-PHP **8.1+** is required, with Guzzle 7.15.2 or later.
+PHP **8.3+** is required, with Guzzle 8.3 or later.
 
 ```sh
 composer require solophp/http-client

@@ -5,16 +5,25 @@ declare(strict_types=1);
 namespace Solo\HttpClient\Tests;
 
 use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Exception\ConnectTimeoutException;
+use GuzzleHttp\Exception\HandlerClosedException;
+use GuzzleHttp\Exception\NetworkTimeoutException;
 use GuzzleHttp\Exception\RequestException as GuzzleRequestException;
+use GuzzleHttp\Exception\ResponseTimeoutException;
 use GuzzleHttp\Exception\ServerException;
+use GuzzleHttp\Exception\TransferException;
 use GuzzleHttp\Psr7\Response;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Psr\Http\Message\RequestInterface;
+use Solo\HttpClient\Exception\HttpClientException;
 use Solo\HttpClient\Exception\NetworkException;
 use Solo\HttpClient\Exception\RequestException;
 
 /**
- * The previous chain of the client's exceptions (the original Guzzle exception, its handler context and
- * nested errors) used to keep the full URL, so Monolog, Sentry or an uncaught-exception dump leaked it.
+ * The previous chain of the client's exceptions (the original Guzzle exception and nested errors) used to
+ * keep the full URL, so Monolog, Sentry or an uncaught-exception dump leaked it. Stack traces are checked
+ * too: zend.exception_ignore_args stays off, as in development, and the client's frames must not show
+ * the URL its caller passed.
  */
 final class ExceptionRedactionTest extends TestCase
 {
@@ -22,13 +31,9 @@ final class ExceptionRedactionTest extends TestCase
 
     private string|false $ignoreArgs = false;
 
-    /**
-     * Stack traces show the caller's own arguments (here: the URL passed to get()) unless
-     * zend.exception_ignore_args is on, as in php.ini-production. That is outside the library's control.
-     */
     protected function setUp(): void
     {
-        $this->ignoreArgs = ini_set('zend.exception_ignore_args', '1');
+        $this->ignoreArgs = ini_set('zend.exception_ignore_args', '0');
     }
 
     protected function tearDown(): void
@@ -68,7 +73,68 @@ final class ExceptionRedactionTest extends TestCase
             $previous = $e->getPrevious();
             self::assertInstanceOf(ServerException::class, $previous);
             self::assertSame(500, $previous->getResponse()->getStatusCode());
-            self::assertStringContainsString('`GET https://api.test/x?api_key=***`', $previous->getMessage());
+            self::assertStringContainsString('`GET https://api.test/x`', $previous->getMessage());
+            self::assertNoSecrets($e);
+        }
+    }
+
+    /**
+     * @return iterable<string, array{callable(RequestInterface): TransferException, class-string}>
+     */
+    public static function transferExceptions(): iterable
+    {
+        $message = static fn(RequestInterface $r): string => "Transfer failed for {$r->getUri()}";
+
+        yield 'connect timeout' => [
+            static fn(RequestInterface $r) => new ConnectTimeoutException($message($r), $r),
+            NetworkException::class,
+        ];
+        yield 'network timeout' => [
+            static fn(RequestInterface $r) => new NetworkTimeoutException($message($r), $r),
+            NetworkException::class,
+        ];
+        yield 'response timeout' => [
+            static fn(RequestInterface $r) => new ResponseTimeoutException($message($r), $r, new Response(200)),
+            RequestException::class,
+        ];
+        yield 'request failure' => [
+            static fn(RequestInterface $r) => new GuzzleRequestException($message($r), $r, 3),
+            RequestException::class,
+        ];
+        yield 'closed handler' => [
+            static fn(RequestInterface $r) => new HandlerClosedException($message($r), $r),
+            HttpClientException::class,
+        ];
+    }
+
+    /**
+     * @param callable(RequestInterface): TransferException $failure
+     * @param class-string $clientClass
+     */
+    #[DataProvider('transferExceptions')]
+    public function testEveryTransferExceptionKeepsItsClass(callable $failure, string $clientClass): void
+    {
+        $original = null;
+        $client = $this->client([
+            static function (RequestInterface $r) use ($failure, &$original) {
+                return $original = $failure($r);
+            },
+        ]);
+
+        try {
+            $client->get('/x?api_key=QUERY-SECRET');
+            self::fail('Expected exception');
+        } catch (HttpClientException $e) {
+            self::assertSame($clientClass, $e::class);
+            self::assertInstanceOf(TransferException::class, $original);
+            $previous = $e->getPrevious();
+            self::assertInstanceOf($original::class, $previous);
+            self::assertSame($original->getCode(), $previous->getCode());
+            self::assertSame($original->getRequest(), $previous->getRequest());
+            if ($original instanceof ResponseTimeoutException) {
+                self::assertInstanceOf(ResponseTimeoutException::class, $previous);
+                self::assertSame($original->getResponse(), $previous->getResponse());
+            }
             self::assertNoSecrets($e);
         }
     }
@@ -78,10 +144,7 @@ final class ExceptionRedactionTest extends TestCase
         $original = null;
         $client = $this->client([
             static function (RequestInterface $r) use (&$original) {
-                return $original = new ConnectException("cURL error 7: failed for {$r->getUri()}", $r, null, [
-                    'errno' => 7,
-                    'url' => (string) $r->getUri(),
-                ]);
+                return $original = new ConnectException("cURL error 7: failed for {$r->getUri()}", $r);
             },
         ]);
 
@@ -102,7 +165,7 @@ final class ExceptionRedactionTest extends TestCase
                 ->request('GET', self::PATH);
             self::fail('Expected exception');
         } catch (ConnectException $e) {
-            self::assertNoSecrets($e);
+            self::assertNoSecrets($e, withTrace: false);
         }
     }
 
@@ -130,16 +193,14 @@ final class ExceptionRedactionTest extends TestCase
     }
 
     /**
-     * Failure shaped like Guzzle's: URL in the message and in the handler context ("url" from curl_getinfo,
-     * "error"), plus a nested PHP error as StreamHandler attaches it.
+     * Failure shaped like Guzzle's: URL in the message, plus a nested PHP error as StreamHandler attaches it.
      */
     private static function leakyConnectError(): callable
     {
         return static fn(RequestInterface $r) => new ConnectException(
             "cURL error 7: Failed to connect for {$r->getUri()}",
             $r,
-            new \RuntimeException("fopen({$r->getUri()}): Failed to open stream"),
-            ['errno' => 7, 'url' => (string) $r->getUri(), 'error' => "Failed to connect to {$r->getUri()}"]
+            new \RuntimeException("fopen({$r->getUri()}): Failed to open stream")
         );
     }
 
@@ -150,8 +211,10 @@ final class ExceptionRedactionTest extends TestCase
         $previous = $e->getPrevious();
         self::assertInstanceOf(ConnectException::class, $previous);
         self::assertSame('/PATH-SECRET/x', $previous->getRequest()->getUri()->getPath(), 'Request is kept intact');
-        self::assertSame(7, $previous->getHandlerContext()['errno']);
-        self::assertSame('https://api.test/***/x?api_key=***', $previous->getHandlerContext()['url']);
+        self::assertSame(
+            'cURL error 7: Failed to connect for https://api.test/***/x?api_key=***',
+            $previous->getMessage()
+        );
 
         $nested = $previous->getPrevious();
         self::assertInstanceOf(\RuntimeException::class, $nested);
@@ -161,14 +224,14 @@ final class ExceptionRedactionTest extends TestCase
         );
     }
 
-    private static function assertNoSecrets(\Throwable $e): void
+    /**
+     * Messages of the whole chain and, by default, the client's own stack trace with its arguments.
+     */
+    private static function assertNoSecrets(\Throwable $e, bool $withTrace = true): void
     {
-        $dump = (string) $e;
+        $dump = $withTrace ? self::traceArguments($e) : '';
         for ($current = $e; $current !== null; $current = $current->getPrevious()) {
             $dump .= $current->getMessage();
-            if ($current instanceof ConnectException || $current instanceof GuzzleRequestException) {
-                $dump .= var_export($current->getHandlerContext(), true);
-            }
         }
 
         self::assertStringNotContainsString('QUERY-SECRET', $dump);

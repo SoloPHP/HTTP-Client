@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Solo\HttpClient\Tests;
 
 use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Exception\NetworkTimeoutException;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\Psr7\Response;
 use Psr\Http\Message\RequestInterface;
@@ -59,16 +60,43 @@ abstract class TestCase extends \PHPUnit\Framework\TestCase
     }
 
     /**
-     * cURL-like ConnectException. errno 7 = could not connect (not sent), 28 = timeout (maybe processed).
+     * The connection was never established, so nothing was sent.
      */
-    protected static function connectError(int $errno): callable
+    protected static function connectError(): callable
     {
         return static fn(RequestInterface $request) => new ConnectException(
-            "cURL error {$errno}: transfer failed for {$request->getUri()}",
-            $request,
-            null,
-            ['errno' => $errno]
+            "cURL error 7: Failed to connect for {$request->getUri()}",
+            $request
         );
+    }
+
+    /**
+     * Timed out after the request was sent: the server may have processed it.
+     */
+    protected static function timeoutError(): callable
+    {
+        return static fn(RequestInterface $request) => new NetworkTimeoutException(
+            "cURL error 28: Operation timed out for {$request->getUri()}",
+            $request
+        );
+    }
+
+    /**
+     * String and array arguments of every frame; objects other than these are skipped.
+     */
+    protected static function traceArguments(\Throwable $e): string
+    {
+        $dump = '';
+        foreach ($e->getTrace() as $frame) {
+            $args = $frame['args'] ?? [];
+            array_walk_recursive($args, static function (mixed $arg) use (&$dump): void {
+                if (is_string($arg)) {
+                    $dump .= $arg . "\n";
+                }
+            });
+        }
+
+        return $dump;
     }
 
     protected function tempFile(string $contents): string

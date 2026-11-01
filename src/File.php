@@ -13,15 +13,15 @@ use Psr\Http\Message\StreamInterface;
  * Files are attached only through this class, never inferred from request data,
  * so user input like `avatar[path]=/etc/passwd` is always sent as plain text.
  */
-final class File
+final readonly class File
 {
     /**
      * @param string|StreamInterface|resource $source Real path of a local file, or an opened stream
      */
     private function __construct(
-        private readonly mixed $source,
-        private readonly string $filename,
-        private readonly ?string $mimeType
+        private mixed $source,
+        private string $filename,
+        private ?string $mimeType
     ) {
         if ($filename === '') {
             throw new \InvalidArgumentException('File name must not be empty');

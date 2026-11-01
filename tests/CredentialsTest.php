@@ -230,12 +230,76 @@ final class CredentialsTest extends TestCase
         self::assertCount(0, $this->sent);
     }
 
-    public function testPerRequestHeadersAcceptWhatGuzzleAccepts(): void
+    public function testPerRequestHeaderValuesAreStringsAsInGuzzle(): void
     {
-        $this->client([self::ok()])->get('/', ['headers' => ['X-Count' => 5, 'X-List' => [1, 'a'], 'X-Empty' => null]]);
+        $client = $this->client([self::ok()]);
+        $client->get('/', ['headers' => ['X-List' => ['a', 'b'], 'X-Empty' => '']]);
 
-        self::assertSame('5', $this->sentRequest()->getHeaderLine('X-Count'));
-        self::assertSame('1, a', $this->sentRequest()->getHeaderLine('X-List'));
+        self::assertSame('a, b', $this->sentRequest()->getHeaderLine('X-List'));
         self::assertTrue($this->sentRequest()->hasHeader('X-Empty'));
+
+        foreach ([5, null, [], ['a', 1]] as $value) {
+            try {
+                $client->get('/', ['headers' => ['X-Value' => $value]]);
+                self::fail('Expected exception for ' . json_encode($value));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('X-Value', $e->getMessage());
+            }
+        }
+        self::assertCount(1, $this->sent);
+    }
+
+    /**
+     * With zend.exception_ignore_args off, as in development, PHP records call arguments in stack traces.
+     */
+    public function testRejectedSecretsStayOutOfStackTraces(): void
+    {
+        $previous = ini_set('zend.exception_ignore_args', '0');
+        $client = $this->client([self::ok()]);
+        $calls = [
+            static fn() => $client->withToken("TOKEN-VALUE\n"),
+            static fn() => $client->withBasicAuth('user', "TOKEN-VALUE\x00"),
+            static fn() => $client->get('/?key=TOKEN-VALUE', ['headers' => ['X-Token' => "TOKEN-VALUE\r"]]),
+            static fn() => new HttpClient('https://api.test', ['headers' => ['X-Api-Key' => "TOKEN-VALUE\n"]]),
+        ];
+
+        try {
+            foreach ($calls as $call) {
+                try {
+                    $call();
+                    self::fail('Expected exception');
+                } catch (\InvalidArgumentException $e) {
+                    self::assertStringNotContainsString('TOKEN-VALUE', $e->getMessage());
+                    self::assertStringNotContainsString('TOKEN-VALUE', self::traceArguments($e));
+                }
+            }
+        } finally {
+            ini_set('zend.exception_ignore_args', (string) $previous);
+        }
+    }
+
+    public function testPerRequestAuthOptionTakesPrecedence(): void
+    {
+        $this->client([self::ok()])->withToken('CLIENT-TOKEN')->get('/', ['auth' => ['user', 'pass']]);
+
+        self::assertSame('Basic ' . base64_encode('user:pass'), $this->sentRequest()->getHeaderLine('Authorization'));
+    }
+
+    public function testBasicAuthFollowsRfc7617(): void
+    {
+        $client = new HttpClient('https://api.test');
+        self::assertNotSame($client, $client->withBasicAuth('user', 'pa:ss'));
+
+        foreach ([['us:er', 'pass'], ["user\n", 'pass'], ['user', "SECRET\x00"]] as [$username, $password]) {
+            try {
+                $client->withBasicAuth($username, $password);
+                self::fail('Expected exception for ' . json_encode($username));
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringNotContainsString('SECRET', $e->getMessage());
+            }
+        }
+
+        $this->expectException(\InvalidArgumentException::class);
+        new HttpClient('https://api.test', ['auth' => ['us:er', 'pass']]);
     }
 }
