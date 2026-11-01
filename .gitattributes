@@ -1,0 +1,10 @@
+# PSR-12 requires LF, and Windows runners check files out with CRLF by default.
+* text=auto eol=lf
+
+# Keep development files out of Composer dist archives.
+/.github            export-ignore
+/docs               export-ignore
+/tests              export-ignore
+/.gitattributes     export-ignore
+/.gitignore         export-ignore
+/phpunit.xml        export-ignore

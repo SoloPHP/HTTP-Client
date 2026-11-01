@@ -1,0 +1,146 @@
+# Behavior in detail
+
+Solo HTTP Client adds safe defaults around Guzzle and leaves the transfer to it. [Getting started](index.md) shows the setup, and the [public API](api.md) describes the contracts. This page explains the rules and how the package is tested.
+
+## Design decisions
+
+- **Configuration is immutable.** A client usually lives in a container and serves many callers. If `withToken()` changed the shared instance, one user's token would stay there for the next caller. Every configuration method returns a copy instead, and the copies share one handler, so they reuse connections.
+- **Credentials belong to an origin.** API responses contain absolute URLs: pagination links, file locations, callbacks. Following one must not hand the token to another host, so client credentials are bound to the origin of the base URI.
+- **Retries are opt-in and conservative.** Repeating a request is safe when the request is idempotent or never reached the server. POST and PATCH are repeated only in those cases, unless the API uses idempotency keys and you say so.
+- **Files are explicit.** In 3.x an array with a `path` key was read as a file, so forwarded form data could make the server upload its own files. Now only `File` objects are files.
+- **Status codes are data.** `http_errors` is off: a 404 or a 503 is a response to inspect, and an exception means the transfer itself failed, as PSR-18 expects.
+- **Secrets stay out of text.** Log lines and exception messages reach people and tools that should not see tokens. Query values, URI credentials and registered secrets are masked wherever the client writes or rethrows text.
+- **JSON fails closed.** Invalid JSON decodes to `null`, never to a truthy value.
+
+## Structure
+
+```text
+src/
+├── HttpClient.php                  Configuration, requests and the Guzzle handler stack
+├── HttpResponse.php                Status checks, body, JSON and headers
+├── File.php                        A file part for multipart requests
+├── Exception/
+│   ├── HttpClientException.php     Base exception, PSR-18 ClientExceptionInterface
+│   ├── RequestAwareException.php   Base of the exceptions that carry the request
+│   ├── NetworkException.php        PSR-18 NetworkExceptionInterface
+│   └── RequestException.php        PSR-18 RequestExceptionInterface
+└── Internal/
+    ├── HeaderParam.php             Percent-encoding of multipart names and file names
+    ├── Redactor.php                Masking of URLs, secrets and exception chains
+    └── RedactingFormatter.php      The log line
+```
+
+## The handler stack
+
+Each copy of the client builds its Guzzle client when it sends its first request; the constructor builds one at once, so invalid options fail early. The handler stack, from the outermost layer inwards:
+
+| Layer | Name | Role |
+|---|---|---|
+| Redaction | `solo_redact` | Rebuilds failed transfer exceptions with redacted messages, handler context and previous chain |
+| Credentials | `solo_auth` | Adds client credentials to requests for the origin |
+| Guzzle defaults | `http_errors`, `allow_redirects`, `cookies`, `prepare_body` | As `HandlerStack::create()` sets them up |
+| Your middleware | the names given to `withMiddleware()` | In the order added |
+| Retries | `solo_retry` | Present after `retry()` |
+| Logging | `solo_log` | Present after `withLogging()` |
+| Handler | | Guzzle's default handler, or the `handler` option |
+
+The order has these consequences:
+
+- Credentials are added once, to the initial request. Guzzle's redirect middleware runs inside that layer, strips them on a hop to another origin, and nothing adds them back.
+- Your middleware sees each redirect hop once, with credentials, and does not see retries.
+- Every attempt is logged: a request retried twice produces three lines.
+- When a request sets `http_errors`, retries still see the response, and the status turns into an exception after the last attempt.
+
+When the `handler` option is a `HandlerStack`, each build works on a copy and your stack is never changed. A plain callable is wrapped with `HandlerStack::create()`. The handler itself, Guzzle's default or yours, is created once and shared by every copy of the client.
+
+## Credentials and origins
+
+Client credentials come from:
+
+- `withToken()`, `withBasicAuth()` or an `Authorization` header in `withHeaders()`;
+- an `Authorization` header in the constructor's `headers` option;
+- the constructor's `auth` option. Basic credentials become an `Authorization` header; digest and NTLM credentials become the cURL options `CURLOPT_HTTPAUTH` and `CURLOPT_USERPWD`.
+
+The client holds one credential at a time. A new `Authorization` header replaces digest or NTLM credentials, and in the constructor the `auth` option replaces an `Authorization` header.
+
+The credential is added to a request when:
+
+- the client has no base URI, or
+- the request's scheme, host and port equal those of the base URI. Letter case and default ports do not matter, so `https://API.example.com:443/` is the origin of `https://api.example.com/v1/`. A subdomain, `http` instead of `https` or another port is a different origin,
+
+and the request does not bring its own credentials: an `Authorization` header or an `auth` option passed with the request is sent as given, to any host, and the client adds nothing.
+
+Redirects never carry client credentials to another origin, with or without a base URI. They are added before Guzzle follows redirects, Guzzle removes the `Authorization` header and cURL credentials on a cross-origin hop, and a later hop back to the origin does not get them again.
+
+## Retries
+
+| Outcome of an attempt | GET, HEAD, OPTIONS, TRACE, PUT, DELETE | POST, PATCH and other methods | With `retryNonIdempotent` |
+|---|---|---|---|
+| 429 response | Retried | Retried | Retried |
+| 5xx response | Retried | Not retried | Retried |
+| Not sent: the host did not resolve, the connection was refused, the TLS handshake failed | Retried | Retried | Retried |
+| Any other network or transfer error, including a timeout | Retried | Not retried | Retried |
+| Any other response | Not retried | Not retried | Not retried |
+
+- Methods are compared in any letter case.
+- "Not sent" means a `ConnectException` with cURL error 6 (`CURLE_COULDNT_RESOLVE_HOST`), 7 (`CURLE_COULDNT_CONNECT`) or 35 (`CURLE_SSL_CONNECT_ERROR`).
+- A request whose body is not seekable, such as a stream that can be read only once, is never retried: the retry would send an empty body.
+- `$maxRetries` counts retries, so `retry(3)` allows four attempts.
+
+Before retry *n*, the client waits `min($maxDelayMs, $delayMs × 2ⁿ⁻¹)` milliseconds plus a random jitter of up to 10% of that value, and never more than `$maxDelayMs`:
+
+| Policy | Retry 1 | Retry 2 | Retry 3 | Retry 4 | Retry 5 |
+|---|---|---|---|---|---|
+| `retry(5, 1000)` | 1000–1100 ms | 2000–2200 ms | 4000–4400 ms | 8000–8800 ms | 16000–17600 ms |
+| `retry(5, 100, 300)` | 100–110 ms | 200–220 ms | 300 ms | 300 ms | 300 ms |
+
+When the response that triggers a retry has a valid `Retry-After` header, its value replaces the computed delay, capped at `$maxDelayMs` and without jitter. Two forms are valid: a number of seconds, up to ten digits, and an IMF-fixdate such as `Wed, 21 Oct 2015 07:28:00 GMT`, where a date in the past means no wait. Any other value, such as `-1`, `1.5` or an obsolete date format, is ignored, and the computed delay applies. The wait itself uses Guzzle's `delay` option.
+
+## Multipart
+
+The multipart helpers turn a field map into parts: nested arrays become `name[key]` fields, `File` objects become file parts, and every other supported value becomes a text field. The `multipart` option of any request goes through the same preparation, so the protections below apply to both, on synchronous and asynchronous paths:
+
+- **Files are explicit.** Only a `File` is opened as a file. An array is a set of text fields, whatever its keys.
+- **No stream wrappers.** `File::fromPath()` rejects `scheme://` and `data:` paths and stores the path returned by `realpath()`, so `fopen()` never reaches a wrapper.
+- **No header injection.** In names and file names, double quotes, backslashes and control characters, CR and LF included, are percent-encoded the way browsers encode them, so a value can neither close the quoted parameter nor start a new header line. MIME types and part headers with invalid characters are rejected.
+- **Validation first.** Every part is validated before the first `File` is opened, so a rejected call opens no file and leaves the streams you passed open and intact.
+
+## Redaction
+
+| Where | What is masked |
+|---|---|
+| The URI in a log line | Query values become `***` (`?page=***&q=***`, and a bare value such as `?SECRET` becomes `?***`); user info and the fragment are removed; then registered secrets |
+| Exception messages and log errors | Every absolute URL in the text, treated like the URI above, not only the request URI: redirect targets and effective URLs appear in Guzzle messages too; then registered secrets |
+| Handler context | Every string in the handler context of Guzzle transfer exceptions, such as `effective_url` |
+| Previous exceptions | The whole chain. A non-Guzzle exception with something to mask becomes a `RuntimeException` whose message starts with its original class name |
+
+- A registered secret is matched as given and in its `rawurlencode()` and `urlencode()` forms. The longest match wins in a single pass, so overlapping secrets are masked completely.
+- An exception with nothing to mask is kept as it was, with its stack trace.
+- Exceptions from the Guzzle client returned by `getClient()` pass the same redaction layer.
+- Header values set on the client or passed with a request are checked before Guzzle builds the request, so an invalid value, often a token with a stray newline, never reaches an exception message.
+- The request returned by `getRequest()` is not changed: it keeps its URI and its headers.
+
+## PSR-18
+
+- `HttpClient` implements `Psr\Http\Client\ClientInterface`. `sendRequest()` never throws for a status code, does not follow redirects, and returns the PSR-7 response.
+- `NetworkException` implements `NetworkExceptionInterface` and `RequestException` implements `RequestExceptionInterface`; both return the failed request from `getRequest()`. Both extend `HttpClientException`, which implements `ClientExceptionInterface`.
+- Type against `ClientInterface` where code only sends PSR-7 requests, and against `HttpClient` where it uses the fluent API.
+
+## Testing
+
+`composer check` validates `composer.json` and runs PHPUnit, PHPStan at its maximum level on `src/`, and the PSR-12 check on `src/` and `tests/`. The suite replaces the network with Guzzle's `MockHandler` behind a recording handler, so every attempt, its options and its body are checked without a server, and retries run without sleeping. `.github/workflows/tests.yml` runs the check on PHP 8.1, 8.2, 8.3, 8.4 and 8.5, and on PHP 8.1 with the lowest version of every dependency. `.github/workflows/docs.yml` builds this site.
+
+## Verified behavior
+
+The test suite checks, among other things:
+
+- that every configuration method returns a new client and leaves the original and its Guzzle client untouched, that one caller's token never reaches a shared instance, that headers merge in any letter case, and that copies build their Guzzle client on first use and share the default handler;
+- credentials sent only to the base origin, with a string or a `UriInterface` base URI, for tokens, basic auth, `Authorization` headers in the constructor, array values, digest and NTLM;
+- credentials dropped on cross-origin redirects with and without a base URI and kept on same-origin redirects, and per-request `Authorization` headers kept as given;
+- invalid header names and values rejected without the value in the message, set on the client, in the constructor or with a request, and per-request numbers and `null` accepted;
+- retries off by default; POST not retried after a 5xx or a timeout, retried after a 429, when the request was not sent, and after a 5xx when allowed; idempotent methods retried after a 5xx and network errors; the retry limit; exponential, capped backoff; `Retry-After` in seconds and as a date, capped and ignored when invalid; non-seekable bodies sent once and seekable bodies retried intact; negative parameters rejected;
+- arrays with a `path` key sent as text; stream wrappers, missing files, directories, NUL bytes and empty names rejected; files from paths, streams and symlinks, with the link's own name; quotes, backslashes and CR/LF encoded in names and file names; invalid MIME types and part headers rejected; caller streams untouched after a failed build; integer keys and nested arrays; the raw `multipart` option on synchronous and asynchronous paths;
+- `null` from `json()` for HTML, empty and truncated bodies, scalar JSON values, nested keys, seekable bodies read again and non-seekable bodies cached;
+- masked query values and user info in log lines, PSR-3 levels, the default `error_log()` writer, path secrets and their URL-encoded forms in logs and exceptions;
+- redacted previous chains on synchronous and asynchronous paths, server exceptions that keep their class and response, untouched exceptions with nothing to hide, and the Guzzle client from `getClient()`;
+- the PSR-18 interface, responses for error statuses, network and request exceptions, asynchronous errors and responses wrapped like synchronous ones, rejected magic calls, `head()`, `send()` and `getConfig()`.

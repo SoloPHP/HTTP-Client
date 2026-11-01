@@ -1,27 +1,27 @@
-!.gitignore
-vendor/
+# Dependencies
+/vendor/
 composer.lock
-example/
-.idea/
-.DS_Store
-Thumbs.db
 
-# PHP
+# Local examples
+/example/
+
+# PHPUnit and coverage
+/.phpunit.cache/
+.phpunit.result.cache
+/coverage/
+*.clover
+
+# Logs and tool caches
 *.log
 *.cache
-.phpunit.result.cache
-.phpunit.cache/
-
-# Coverage
-coverage/
-*.clover
 
 # Environment files
 .env
 .env.local
 .env.*.local
 
-# IDE
+# IDE and editors
+.idea/
 .vscode/
 *.swp
 *.swo
@@ -29,9 +29,13 @@ coverage/
 
 # OS
 .DS_Store
-.DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Documentation
+/docs/node_modules/
+/docs/.vitepress/cache/
+/docs/.vitepress/dist/

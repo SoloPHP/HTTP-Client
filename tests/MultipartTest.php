@@ -149,6 +149,25 @@ final class MultipartTest extends TestCase
         self::assertSame('report:2024.txt', $file->filename());
     }
 
+    public function testSymlinkIsSentUnderItsOwnName(): void
+    {
+        $link = sys_get_temp_dir() . '/solo-avatar-' . getmypid() . '.jpg';
+        if (!@symlink($this->tempFile('jpeg-bytes'), $link)) {
+            self::markTestSkipped('Symlinks are not available');
+        }
+
+        try {
+            $this->client([self::ok()])->postMultipart('/upload', ['avatar' => File::fromPath($link)]);
+        } finally {
+            @unlink($link);
+        }
+
+        $body = $this->sentBody();
+        self::assertStringContainsString('filename="' . basename($link) . '"', $body);
+        self::assertStringContainsString('Content-Type: image/jpeg', $body);
+        self::assertStringContainsString('jpeg-bytes', $body);
+    }
+
     public function testFailedBuildDoesNotTouchCallerStreams(): void
     {
         $stream = Utils::streamFor('caller-owned');

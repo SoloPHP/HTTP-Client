@@ -51,7 +51,8 @@ final class File
             throw new \InvalidArgumentException('File does not exist or is not readable: ' . basename($path));
         }
 
-        return new self($realPath, $filename ?? basename($realPath), $mimeType);
+        // The default name comes from the path as given, so a symlink is sent under its own name.
+        return new self($realPath, $filename ?? basename($path), $mimeType);
     }
 
     /**

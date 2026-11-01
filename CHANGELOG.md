@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.0.1
+
+### Security
+
+- **Secrets in per-request header errors.** An invalid per-request header value, such as a token read from a file
+  with its trailing newline, made Guzzle throw an exception whose message contained the value. Per-request headers
+  are now checked first, and the message names only the header.
+- **Guzzle 7.15.2 is the minimum.** Earlier Guzzle and `guzzlehttp/psr7` releases have known vulnerabilities,
+  including host confusion (CVE-2026-69246, and CVE-2026-59882 in `guzzlehttp/psr7`) that could defeat the origin
+  check client credentials rely on.
+
+### Fixed
+
+- `File::fromPath()` sent a symlink under the name of its target, so the part also got the MIME type guessed from
+  that name. The default file name comes from the path as given again, as in 3.x.
+
+### Added
+
+- [Documentation](https://solophp.github.io/HTTP-Client/): getting started, API reference and behavior in detail.
+
 ## 4.0.0
 
 ### Security

@@ -35,6 +35,8 @@ use Solo\HttpClient\Internal\Redactor;
 class HttpClient implements ClientInterface
 {
     private const IDEMPOTENT_METHODS = ['GET', 'HEAD', 'OPTIONS', 'TRACE', 'PUT', 'DELETE'];
+    /** The guzzlehttp/psr7 rule for header values */
+    private const HEADER_VALUE_PATTERN = '/^[\x20\x09\x21-\x7E\x80-\xFF]*$/D';
 
     /** Built on first use; every clone starts without one, so a chain of with*() calls builds a single client. */
     private ?Client $client = null;
@@ -419,14 +421,17 @@ class HttpClient implements ClientInterface
     }
 
     /**
-     * Single path of every request: prepares the multipart option, turns synchronous throws and
-     * rejections into the client's exceptions, and responses into HttpResponse.
+     * Single path of every request: checks per-request headers, prepares the multipart option, turns
+     * synchronous throws and rejections into the client's exceptions, and responses into HttpResponse.
      *
      * @param callable(Client, array<string, mixed>): PromiseInterface $start
      * @param array<string, mixed> $options
      */
     private function dispatch(callable $start, array $options): PromiseInterface
     {
+        if (isset($options['headers']) && is_array($options['headers'])) {
+            self::assertRequestHeaders($options['headers']);
+        }
         if (isset($options['multipart']) && is_array($options['multipart'])) {
             $options['multipart'] = self::prepareMultipart($options['multipart']);
         }
@@ -794,7 +799,7 @@ class HttpClient implements ClientInterface
     {
         $values = [];
         foreach (is_array($value) ? $value : [$value] as $item) {
-            if (!is_string($item) || preg_match('/^[\x20\x09\x21-\x7E\x80-\xFF]*$/D', $item) !== 1) {
+            if (!is_string($item) || preg_match(self::HEADER_VALUE_PATTERN, $item) !== 1) {
                 throw new \InvalidArgumentException(
                     "Header {$name} must be a string without control characters"
                 );
@@ -807,6 +812,29 @@ class HttpClient implements ClientInterface
         }
 
         return $values;
+    }
+
+    /**
+     * Per-request headers are passed to Guzzle as given (Guzzle also accepts numbers and null), but are
+     * checked first: Guzzle's own message would contain the invalid value, often a token.
+     *
+     * @param array<array-key, mixed> $headers
+     */
+    private static function assertRequestHeaders(array $headers): void
+    {
+        foreach ($headers as $name => $value) {
+            $name = self::assertHeaderName((string) $name);
+            foreach (is_array($value) ? $value : [$value] as $item) {
+                if (
+                    !(is_scalar($item) || $item === null)
+                    || preg_match(self::HEADER_VALUE_PATTERN, (string) $item) !== 1
+                ) {
+                    throw new \InvalidArgumentException(
+                        "Header {$name} must be a scalar without control characters"
+                    );
+                }
+            }
+        }
     }
 
     /**

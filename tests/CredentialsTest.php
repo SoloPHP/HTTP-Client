@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Solo\HttpClient\Tests;
 
+use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\Psr7\Uri;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -207,5 +208,34 @@ final class CredentialsTest extends TestCase
         } catch (\InvalidArgumentException $e) {
             self::assertStringNotContainsString('KEY-VALUE', $e->getMessage());
         }
+    }
+
+    public function testInvalidPerRequestHeaderIsRejectedWithoutLeakingIt(): void
+    {
+        $client = $this->client([self::ok(), self::ok()]);
+        $calls = [
+            static fn() => $client->get('/', ['headers' => ['Authorization' => "Bearer SECRET-VALUE\n"]]),
+            static fn() => $client->getAsync('/', ['headers' => ['X-Api-Key' => ["SECRET-VALUE\r\n"]]]),
+            static fn() => $client->send(new Request('GET', '/'), ['headers' => ['X-Api-Key' => "SECRET-VALUE\x01"]]),
+        ];
+
+        foreach ($calls as $call) {
+            try {
+                $call();
+                self::fail('Expected exception');
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringNotContainsString('SECRET-VALUE', $e->getMessage());
+            }
+        }
+        self::assertCount(0, $this->sent);
+    }
+
+    public function testPerRequestHeadersAcceptWhatGuzzleAccepts(): void
+    {
+        $this->client([self::ok()])->get('/', ['headers' => ['X-Count' => 5, 'X-List' => [1, 'a'], 'X-Empty' => null]]);
+
+        self::assertSame('5', $this->sentRequest()->getHeaderLine('X-Count'));
+        self::assertSame('1, a', $this->sentRequest()->getHeaderLine('X-List'));
+        self::assertTrue($this->sentRequest()->hasHeader('X-Empty'));
     }
 }
