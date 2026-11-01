@@ -1,6 +1,6 @@
 # Public API reference
 
-This reference describes Solo HTTP Client 4.0: PHP 8.1+, `guzzlehttp/guzzle` 7.15.2+, `psr/http-client` 1.0, `psr/log` 3.0 and the `Solo\HttpClient` namespace. [Getting started](index.md) walks through the setup, and [Behavior in detail](details.md) explains the rules below.
+This reference describes Solo HTTP Client 5.0: PHP 8.3+, `guzzlehttp/guzzle` 8.3+, `guzzlehttp/psr7` 3.2+, `guzzlehttp/promises` 3.1+, `psr/http-client` 1.0, `psr/log` 3.0 and the `Solo\HttpClient` namespace. [Getting started](index.md) walks through the setup, and [Behavior in detail](details.md) explains the rules below.
 
 | Type | Role |
 |---|---|
@@ -13,6 +13,8 @@ This reference describes Solo HTTP Client 4.0: PHP 8.1+, `guzzlehttp/guzzle` 7.1
 | `Exception\RequestAwareException` | Abstract base of the two above, with `getRequest()` |
 
 Classes in `Solo\HttpClient\Internal` and `File::openStream()` are marked `@internal` and are not part of the public API.
+
+Parameters that can carry secrets are marked `#[\SensitiveParameter]`: the base URI and the options of the constructor, URIs, request options, requests, headers, tokens, passwords, redaction secrets and multipart data. Stack traces show them as `SensitiveParameterValue` even when `zend.exception_ignore_args` is off.
 
 ## HttpClient
 
@@ -34,7 +36,7 @@ public static function create(string $baseUri = '', array $config = []): self
 | `timeout` | `30` | Seconds for the whole transfer |
 | `http_errors` | `false` | 4xx and 5xx responses are returned, not thrown |
 | `headers` | none | Must be an array; validated like `withHeaders()`. `Authorization` becomes the client's credential |
-| `auth` | none | `[$user, $password]`, optionally with `'basic'`, `'digest'` or `'ntlm'`. Taken over by the client and bound to the origin |
+| `auth` | none | `[$user, $password]`, optionally with `'basic'`, `'digest'` or `'ntlm'`. Taken over by the client and bound to the origin. Basic credentials follow the rule of `withBasicAuth()`; digest and NTLM become cURL options |
 | `handler` | Guzzle's default | A callable handler or a `HandlerStack`, created once and shared by every copy |
 
 Any other option, such as `connect_timeout`, `verify`, `proxy`, `cookies` or `allow_redirects`, reaches Guzzle unchanged. The constructor builds the Guzzle client at once, so an invalid option fails there. A non-callable `handler`, non-array `headers` or an invalid header throws `InvalidArgumentException`.
@@ -68,7 +70,7 @@ Each method returns a new client and leaves the current one unchanged.
 | `timeout()` | Sets the `timeout` option for every request |
 | `withHeaders()` | Merges headers into the defaults, replacing a header with the same name in any letter case. A value is a string or a non-empty list of strings without control characters. `Authorization` becomes the client's credential and replaces digest or NTLM credentials |
 | `withToken()` | `withHeaders(['Authorization' => "{$type} {$token}"])` |
-| `withBasicAuth()` | `withToken(base64_encode("{$username}:{$password}"), 'Basic')` |
+| `withBasicAuth()` | `withToken(base64_encode("{$username}:{$password}"), 'Basic')`. As RFC 7617 and Guzzle 8 require, a colon in the username or a control character throws `InvalidArgumentException` |
 | `retry()` | Replaces the retry policy. `$maxRetries = 0` turns retries off; a negative argument throws `InvalidArgumentException`. [Retries](details.md#retries) gives the rules |
 | `withLogging()` | Replaces the logger. A PSR-3 logger receives `info` for responses and `error` for failed transfers; a callable receives the line as its only argument; `null` writes `[HttpClient] INFO: <line>` or `[HttpClient] ERROR: <line>` with `error_log()` |
 | `withRedaction()` | Adds secrets to mask in log lines and exception messages, together with their URL-encoded forms. Empty strings are ignored |
@@ -93,15 +95,15 @@ public function send(RequestInterface $request, array $options = []): HttpRespon
 
 `$uri` is resolved against the base URI. `$options` apply to this request only:
 
-- `headers` take precedence over client headers with the same name. They are checked before Guzzle sees them: names and values follow the same rule as `withHeaders()`, and numbers and `null` are accepted as Guzzle accepts them. `'headers' => null` drops the client's headers for this request, but not its credentials.
+- `headers` take precedence over client headers with the same name. They are checked before Guzzle sees them, by the rule of `withHeaders()`, which is Guzzle 8's: a value is a string or a non-empty list of strings. `'headers' => null` drops the client's headers for this request, but not its credentials.
 - An `Authorization` header or an `auth` option takes precedence over the client's credentials and is sent to any host.
 - `multipart` is prepared like the [multipart helpers](#multipart-helpers): `File` objects are accepted as contents, array contents become nested fields, names and file names are percent-encoded, and part headers are validated. Each part needs `name` and `contents`; `filename` must be a string and `headers` an array, and neither can be combined with array contents.
 
 | Exception | Thrown when |
 |---|---|
-| `NetworkException` | The host did not resolve, the connection failed, the TLS handshake failed or the transfer timed out |
-| `RequestException` | Another transfer failure, such as too many redirects, or an error status when the request sets `http_errors` |
-| `HttpClientException` | Any other Guzzle exception |
+| `NetworkException` | No response: the host did not resolve, the connection or the TLS handshake failed, sending or receiving failed, or a timeout came before the response |
+| `RequestException` | Another transfer failure, such as too many redirects or a response that broke off, or an error status when the request sets `http_errors` |
+| `HttpClientException` | Any other Guzzle exception, such as an invalid request option |
 | `InvalidArgumentException` | An invalid header or invalid multipart data, before anything is sent |
 
 ### Multipart helpers
@@ -170,7 +172,7 @@ public function getConfig(?string $option = null): mixed
 
 `getClient()` returns the Guzzle client of this instance, built on first use and kept. Requests sent through it pass the same handler stack, so credentials, retries, logging and redaction apply, but the responses are plain PSR-7 responses and the exceptions are Guzzle's own, redacted.
 
-`getConfig()` mirrors Guzzle's `Client::getConfig()`, which Guzzle 8 removes. The client's credentials do not appear in it: `Authorization` is absent from `headers`, and `auth` is absent once the client has taken it over.
+`getConfig()` returns Guzzle's `Client::getConfig()`. The client's credentials do not appear in it: `Authorization` is absent from `headers`, and `auth` is absent once the client has taken it over.
 
 ### Other methods
 
@@ -250,13 +252,13 @@ RuntimeException
 
 | Exception | Wraps |
 |---|---|
-| `NetworkException` | Guzzle's `ConnectException`: DNS, connection, TLS handshake and timeout errors |
-| `RequestException` | Guzzle's `RequestException` and its subclasses: other cURL errors, `TooManyRedirectsException`, and `ClientException` or `ServerException` when a request sets `http_errors` |
-| `HttpClientException` | Any other `GuzzleException`, and a promise rejected with a value that is not an exception |
+| `NetworkException` | Guzzle's `NetworkException`, for failures without a response: `ConnectException` (DNS, TCP connect, TLS setup), `ConnectTimeoutException`, `NetworkTimeoutException`, and send and receive errors |
+| `RequestException` | Guzzle's `RequestException` and its `ResponseException` branch: `ResponseTransferException`, `ResponseTimeoutException`, `TooManyRedirectsException`, and `ClientException` or `ServerException` when a request sets `http_errors` |
+| `HttpClientException` | Any other `GuzzleException`, such as `HandlerClosedException` or Guzzle's `InvalidArgumentException` for an invalid option, and a promise rejected with a value that is not an exception |
 
 - `getMessage()` is `HTTP request failed: ` followed by Guzzle's message, redacted.
 - `getCode()` is Guzzle's code.
-- `getPrevious()` is the Guzzle exception, redacted, with its response when it had one.
+- `getPrevious()` is the Guzzle exception, redacted, with its response when it is a `ResponseException`.
 - `getRequest()` returns the request that failed, unchanged.
 
 Exceptions that do not come from Guzzle, such as a `LogicException` thrown by your own middleware, reach the caller unchanged.
@@ -279,7 +281,7 @@ The URI and the error message are redacted as described in [Redaction](details.m
 - HTTP error statuses are returned as responses unless a request sets `http_errors`.
 - Transfer failures throw the client's exceptions; invalid arguments throw `InvalidArgumentException` before any request is sent.
 - A URL that Guzzle cannot parse throws Guzzle's `MalformedUriException`, whose message contains the URL as written.
-- Stack traces can show your own call arguments, such as a URL passed to `get()`, unless `zend.exception_ignore_args` is on, as it is in `php.ini-production`.
+- Stack traces hide the client's parameters that carry secrets. Arguments of your own functions, and of Guzzle's that it does not mark, stay visible unless `zend.exception_ignore_args` is on, as it is in `php.ini-production`.
 - `getRequest()` returns the request with all its headers, `Authorization` included. Do not serialize it into logs.
-- POST and PATCH are recognized as unsent through cURL error codes. With a handler that is not cURL-based, they are not retried after network errors.
-- Digest and NTLM credentials need the cURL extension, as in Guzzle.
+- POST and PATCH are recognized as unsent through Guzzle's `ConnectException`. A custom handler must report connection failures with it for those retries to happen.
+- Digest and NTLM credentials set on the client need the cURL extension. A request's own `auth` option follows Guzzle 8, which implements Digest itself and has no NTLM.

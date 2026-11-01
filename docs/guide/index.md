@@ -8,8 +8,8 @@ well.
 
 ## Install
 
-PHP 8.1+ is required. Composer installs Guzzle 7.15.2+, `psr/http-client` and
-`psr/log` with the package.
+PHP 8.3+ is required. Composer installs Guzzle 8.3+ with its PSR-7 and promise
+libraries, `psr/http-client` and `psr/log` with the package.
 
 ```sh
 composer require solophp/http-client
@@ -131,6 +131,9 @@ $api = $api->withToken($token, 'Token');      // Authorization: Token <token>
 $api = $api->withBasicAuth('user', 'secret'); // Authorization: Basic dXNlcjpzZWNyZXQ=
 ```
 
+As RFC 7617 requires, a username cannot contain a colon, and neither part can
+contain a control character.
+
 Credentials set on the client go only to the origin of the base URI: the same
 scheme, host and port. This covers these methods, an `Authorization` header in
 `withHeaders()` or in the constructor options, and Guzzle's `auth` option,
@@ -162,10 +165,10 @@ $api = $api->retry(0);              // off again
 
 GET, HEAD, OPTIONS, TRACE, PUT and DELETE are retried after a network error, a
 429 and a 5xx response. POST and PATCH are retried after a 429, or when the
-request never left the client: the host did not resolve, the connection was
-refused or the TLS handshake failed. A timeout or a 5xx may come after the
-server has already processed the request, and repeating it could charge a card
-twice. If the API supports idempotency keys, allow those retries explicitly:
+connection was never established: the host did not resolve, the connection was
+refused or timed out, or the TLS handshake failed. A later timeout or a 5xx may
+come after the server has already processed the request, and repeating it could
+charge a card twice. If the API supports idempotency keys, allow those retries explicitly:
 
 ```php
 $payments = $api->retry(3, 1000, retryNonIdempotent: true);
@@ -261,8 +264,8 @@ Error statuses are responses. Exceptions mean that the transfer itself failed:
 
 | Problem | Exception |
 | --- | --- |
-| The host did not resolve, the connection failed or timed out | `NetworkException`, a PSR-18 `NetworkExceptionInterface` |
-| Another transfer failure, such as too many redirects | `RequestException`, a PSR-18 `RequestExceptionInterface` |
+| No response: the host did not resolve, the connection failed, sending or receiving failed, or a timeout came before the response | `NetworkException`, a PSR-18 `NetworkExceptionInterface` |
+| Another transfer failure, such as too many redirects or a response that broke off | `RequestException`, a PSR-18 `RequestExceptionInterface` |
 | Any other Guzzle error | `HttpClientException`, a PSR-18 `ClientExceptionInterface` |
 | An invalid header, unsupported multipart data, a missing file | `InvalidArgumentException`, before anything is sent |
 
@@ -277,7 +280,7 @@ use Solo\HttpClient\Exception\NetworkException;
 try {
     $response = $api->get('users/42');
 } catch (NetworkException $e) {
-    // DNS, connection or timeout: the API is unreachable
+    // no response: the API is unreachable
     throw new ServiceUnavailable('The users API is unreachable', previous: $e);
 } catch (HttpClientException $e) {
     $logger->error('The users API request failed', ['exception' => $e]);
@@ -289,9 +292,11 @@ if ($response->status() === 404) {
 }
 ```
 
-The message, the handler context and the chain of previous exceptions are
-redacted like log lines, so an exception can go to a logger or an error tracker
-as it is. [Redaction](details.md#redaction) explains what is masked.
+The message and the chain of previous exceptions are
+redacted like log lines, and parameters that carry secrets, such as the URI and
+the options, are hidden in stack traces. An exception can go to a logger or an
+error tracker as it is. [Redaction](details.md#redaction) explains what is
+masked.
 
 ## Test code that uses the client
 
@@ -328,4 +333,4 @@ $history[0]['request']->getHeaderLine('Authorization');
 
 - [Public API reference](api.md)
 - [Behavior in detail](details.md)
-- [Upgrading from 3.x](https://github.com/SoloPHP/HTTP-Client/blob/main/CHANGELOG.md#upgrading-from-3x)
+- [Upgrading from 4.x](https://github.com/SoloPHP/HTTP-Client/blob/main/CHANGELOG.md#upgrading-from-4x)

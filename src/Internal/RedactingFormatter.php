@@ -13,17 +13,18 @@ use Psr\Http\Message\ResponseInterface;
  *
  * @internal
  */
-final class RedactingFormatter implements MessageFormatterInterface
+final readonly class RedactingFormatter implements MessageFormatterInterface
 {
     /**
      * @param array<array-key, string> $redactions See Redactor::redactions()
      */
-    public function __construct(private readonly array $redactions)
+    public function __construct(#[\SensitiveParameter] private array $redactions)
     {
     }
 
+    #[\Override]
     public function format(
-        RequestInterface $request,
+        #[\SensitiveParameter] RequestInterface $request,
         ?ResponseInterface $response = null,
         ?\Throwable $error = null
     ): string {

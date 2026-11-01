@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace Solo\HttpClient\Tests;
 
+use GuzzleHttp\Exception\ConnectTimeoutException;
+use GuzzleHttp\Exception\ResponseTimeoutException;
 use GuzzleHttp\Psr7\NoSeekStream;
 use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\Psr7\Utils;
 use Psr\Http\Message\RequestInterface;
 use Solo\HttpClient\Exception\NetworkException;
+use Solo\HttpClient\Exception\RequestException;
 use Solo\HttpClient\HttpClient;
 
 /**
@@ -36,7 +39,7 @@ final class RetryTest extends TestCase
 
     public function testPostIsNotRetriedAfterTimeoutBecauseServerMayHaveProcessedIt(): void
     {
-        $client = $this->client([self::connectError(28), self::ok()])->retry(3);
+        $client = $this->client([self::timeoutError(), self::ok()])->retry(3);
 
         try {
             $client->post('/charge');
@@ -48,7 +51,7 @@ final class RetryTest extends TestCase
 
     public function testPostIsRetriedWhenRequestWasNotSent(): void
     {
-        $response = $this->client([self::connectError(7), self::ok()])->retry(3)->post('/charge');
+        $response = $this->client([self::connectError(), self::ok()])->retry(3)->post('/charge');
 
         self::assertSame(200, $response->status());
         self::assertCount(2, $this->sent);
@@ -74,7 +77,7 @@ final class RetryTest extends TestCase
 
     public function testIdempotentRequestIsRetriedOn5xxAndNetworkErrors(): void
     {
-        $response = $this->client([new Response(503), self::connectError(28), self::ok()])->retry(3, 1)->get('/users');
+        $response = $this->client([new Response(503), self::timeoutError(), self::ok()])->retry(3, 1)->get('/users');
 
         self::assertSame(200, $response->status());
         self::assertCount(3, $this->sent);
@@ -148,6 +151,34 @@ final class RetryTest extends TestCase
 
         self::assertSame(200, $response->status());
         self::assertSame(['PAYLOAD', 'PAYLOAD'], $bodies);
+    }
+
+    public function testPostIsRetriedAfterConnectTimeoutBecauseNothingWasSent(): void
+    {
+        $failure = static fn(RequestInterface $r) => new ConnectTimeoutException('Connect timed out', $r);
+        $response = $this->client([$failure, self::ok()])->retry(3)->post('/charge');
+
+        self::assertSame(200, $response->status());
+        self::assertCount(2, $this->sent);
+    }
+
+    /**
+     * A transfer that breaks after the response headers is a network error, not a 200 response.
+     */
+    public function testBrokenResponseTransferIsRetriedForGetOnly(): void
+    {
+        $failure = static fn(RequestInterface $r) => new ResponseTimeoutException('Body timed out', $r, new Response());
+
+        self::assertSame(200, $this->client([$failure, self::ok()])->retry(3)->get('/users')->status());
+        self::assertCount(2, $this->sent);
+
+        $this->sent = [];
+        try {
+            $this->client([$failure, self::ok()])->retry(3)->post('/charge');
+            self::fail('Expected exception');
+        } catch (RequestException) {
+            self::assertCount(1, $this->sent);
+        }
     }
 
     public function testNegativeParametersAreRejected(): void

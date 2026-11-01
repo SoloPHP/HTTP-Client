@@ -1,5 +1,73 @@
 # Changelog
 
+## 5.0.0-RC1
+
+Built on Guzzle 8. Request options, middleware, handlers, promises, `getClient()` and the Guzzle exceptions in
+`getPrevious()` follow Guzzle 8; see [Upgrading from 4.x](#upgrading-from-4x).
+
+### Changed
+
+- **PHP 8.3 or later** is required.
+- **Guzzle 8.3** with `guzzlehttp/psr7` 3.2 and `guzzlehttp/promises` 3.1 replaces Guzzle 7.
+- **Exceptions follow Guzzle 8's classification.** `NetworkException` now covers every failure without a response,
+  including send and receive errors that were `RequestException`. `RequestException` covers request failures and
+  responses that broke off: a timeout after the response headers is now `RequestException`, with the response in
+  `getPrevious()`.
+- **Retries.** "Not sent" means Guzzle's `ConnectException`, so POST and PATCH are also retried after a connect
+  timeout, with any handler rather than only on cURL errors 6, 7 and 35. A response that breaks off after its
+  headers is retried for GET, HEAD, OPTIONS, TRACE, PUT and DELETE.
+- **Per-request header values** must be strings or non-empty lists of strings, as Guzzle 8 requires.
+- **Basic credentials** in `withBasicAuth()` and the `auth` option follow RFC 7617, as in Guzzle 8: a colon in the
+  username or a control character is rejected.
+- **A request's own `auth` option** takes precedence over the client's credentials. Guzzle 8 applies it inside the
+  handler stack, after the client adds its credentials.
+
+### Security
+
+- **Secrets stay out of stack traces.** Parameters that can carry secrets are marked `#[\SensitiveParameter]`: URIs,
+  request options, headers, tokens, passwords, redaction secrets and multipart data. Stack traces show them as
+  `SensitiveParameterValue` even when `zend.exception_ignore_args` is off.
+
+### Removed
+
+- Redaction of the handler context: Guzzle 8 exceptions have none.
+
+## Upgrading from 4.x
+
+1. **Require PHP 8.3 and allow Guzzle 8.** Packages that pin `guzzlehttp/guzzle` ^7, `guzzlehttp/psr7` ^2 or
+   `guzzlehttp/promises` ^2 must allow the new majors first.
+
+2. **Read Guzzle's [7.0 to 8.0 upgrade guide](https://github.com/guzzle/guzzle/blob/8.3.1/UPGRADING.md)** for the
+   request options, middleware and handlers you pass to the client.
+
+3. **Review catch blocks.** Send and receive errors are `NetworkException` now, and a timeout after the response
+   headers is `RequestException`. Catch `HttpClientException` to handle every transfer failure:
+
+   ```php
+   try {
+       $response = $client->get('/users');
+   } catch (NetworkException $e) {
+       // no response: DNS, connection, send or receive error, timeout before the response
+   } catch (HttpClientException $e) {
+       // any other transfer failure
+   }
+   ```
+
+4. **Guzzle exceptions in `getPrevious()`** have no `getHandlerContext()`. `getResponse()` exists only on Guzzle's
+   `ResponseException` and its subclasses.
+
+5. **Per-request header values must be strings:**
+
+   ```php
+   // 4.x
+   $client->get('/items', ['headers' => ['X-Page' => 2]]);
+
+   // 5.0
+   $client->get('/items', ['headers' => ['X-Page' => '2']]);
+   ```
+
+6. **Basic auth usernames cannot contain a colon.** The server would split such a username at the colon.
+
 ## 4.0.1
 
 ### Security

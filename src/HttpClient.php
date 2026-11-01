@@ -5,9 +5,10 @@ declare(strict_types=1);
 namespace Solo\HttpClient;
 
 use GuzzleHttp\Client;
+use GuzzleHttp\Exception\BadResponseException;
 use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\GuzzleException;
-use GuzzleHttp\Exception\RequestException as GuzzleRequestException;
+use GuzzleHttp\Exception\TransferException;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Promise\Create;
@@ -16,6 +17,8 @@ use GuzzleHttp\Psr7\UriComparator;
 use GuzzleHttp\Psr7\Utils as Psr7Utils;
 use GuzzleHttp\Utils;
 use Psr\Http\Client\ClientInterface;
+use Psr\Http\Client\NetworkExceptionInterface;
+use Psr\Http\Client\RequestExceptionInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamInterface;
@@ -31,12 +34,15 @@ use Solo\HttpClient\Internal\Redactor;
 
 /**
  * Immutable: timeout(), retry() and with*() return a new instance and never change the current one.
+ *
+ * Parameters that can carry secrets (URIs, options, headers, credentials) are marked #[\SensitiveParameter],
+ * so stack traces show them as SensitiveParameterValue even when zend.exception_ignore_args is off.
  */
 class HttpClient implements ClientInterface
 {
-    private const IDEMPOTENT_METHODS = ['GET', 'HEAD', 'OPTIONS', 'TRACE', 'PUT', 'DELETE'];
+    private const array IDEMPOTENT_METHODS = ['GET', 'HEAD', 'OPTIONS', 'TRACE', 'PUT', 'DELETE'];
     /** The guzzlehttp/psr7 rule for header values */
-    private const HEADER_VALUE_PATTERN = '/^[\x20\x09\x21-\x7E\x80-\xFF]*$/D';
+    private const string HEADER_VALUE_PATTERN = '/^[\x20\x09\x21-\x7E\x80-\xFF]*$/D';
 
     /** Built on first use; every clone starts without one, so a chain of with*() calls builds a single client. */
     private ?Client $client = null;
@@ -61,8 +67,10 @@ class HttpClient implements ClientInterface
     /**
      * @param array<string, mixed> $config Guzzle options; a custom "handler" is honored
      */
-    public function __construct(string $baseUri = '', array $config = [])
-    {
+    public function __construct(
+        #[\SensitiveParameter] string $baseUri = '',
+        #[\SensitiveParameter] array $config = []
+    ) {
         $config = array_merge([
             'base_uri' => $baseUri,
             'timeout' => 30,
@@ -100,8 +108,10 @@ class HttpClient implements ClientInterface
     /**
      * @param array<string, mixed> $config
      */
-    public static function create(string $baseUri = '', array $config = []): self
-    {
+    public static function create(
+        #[\SensitiveParameter] string $baseUri = '',
+        #[\SensitiveParameter] array $config = []
+    ): self {
         return new self($baseUri, $config);
     }
 
@@ -115,7 +125,7 @@ class HttpClient implements ClientInterface
     /**
      * @param array<string, string|list<string>> $headers
      */
-    public function withHeaders(array $headers): static
+    public function withHeaders(#[\SensitiveParameter] array $headers): static
     {
         $clone = clone $this;
         $clone->applyHeaders($headers);
@@ -125,7 +135,7 @@ class HttpClient implements ClientInterface
     /**
      * The token is sent only to the origin of base_uri (or everywhere when base_uri is empty).
      */
-    public function withToken(string $token, string $type = 'Bearer'): static
+    public function withToken(#[\SensitiveParameter] string $token, string $type = 'Bearer'): static
     {
         return $this->withHeaders(['Authorization' => "{$type} {$token}"]);
     }
@@ -133,14 +143,16 @@ class HttpClient implements ClientInterface
     /**
      * Credentials are sent only to the origin of base_uri (or everywhere when base_uri is empty).
      */
-    public function withBasicAuth(string $username, string $password): static
-    {
-        return $this->withToken(base64_encode("{$username}:{$password}"), 'Basic');
+    public function withBasicAuth(
+        #[\SensitiveParameter] string $username,
+        #[\SensitiveParameter] string $password
+    ): static {
+        return $this->withHeaders(['Authorization' => self::basicAuthorization($username, $password)]);
     }
 
     /**
      * Retries are off by default. GET, HEAD, OPTIONS, TRACE, PUT and DELETE are retried on network errors,
-     * 429 and 5xx. POST and PATCH are retried only on 429 or when the request was never sent,
+     * 429 and 5xx. POST and PATCH are retried only on 429 or when the connection was never established,
      * unless $retryNonIdempotent is true (use it only with idempotency keys).
      */
     public function retry(
@@ -174,7 +186,7 @@ class HttpClient implements ClientInterface
     /**
      * Mask values (e.g. a token embedded in the URL path) in logs and exception messages.
      */
-    public function withRedaction(string ...$secrets): static
+    public function withRedaction(#[\SensitiveParameter] string ...$secrets): static
     {
         $clone = clone $this;
         $clone->redactions += Redactor::redactions(...$secrets);
@@ -194,31 +206,37 @@ class HttpClient implements ClientInterface
     /**
      * @param array<array-key, mixed> $data Scalars, Stringable, streams, File objects or nested arrays
      */
-    public function postMultipart(string $uri, array $data): HttpResponse
-    {
+    public function postMultipart(
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $data
+    ): HttpResponse {
         return $this->request('POST', $uri, ['multipart' => self::multipartFields($data)]);
     }
 
     /**
      * @param array<array-key, mixed> $data Scalars, Stringable, streams, File objects or nested arrays
      */
-    public function putMultipart(string $uri, array $data): HttpResponse
-    {
+    public function putMultipart(
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $data
+    ): HttpResponse {
         return $this->request('PUT', $uri, ['multipart' => self::multipartFields($data)]);
     }
 
     /**
      * @param array<array-key, mixed> $data Scalars, Stringable, streams, File objects or nested arrays
      */
-    public function patchMultipart(string $uri, array $data): HttpResponse
-    {
+    public function patchMultipart(
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $data
+    ): HttpResponse {
         return $this->request('PATCH', $uri, ['multipart' => self::multipartFields($data)]);
     }
 
     /**
      * @param array<string, mixed> $options
      */
-    public function get(string $uri, array $options = []): HttpResponse
+    public function get(#[\SensitiveParameter] string $uri, #[\SensitiveParameter] array $options = []): HttpResponse
     {
         return $this->request('GET', $uri, $options);
     }
@@ -226,7 +244,7 @@ class HttpClient implements ClientInterface
     /**
      * @param array<string, mixed> $options
      */
-    public function head(string $uri, array $options = []): HttpResponse
+    public function head(#[\SensitiveParameter] string $uri, #[\SensitiveParameter] array $options = []): HttpResponse
     {
         return $this->request('HEAD', $uri, $options);
     }
@@ -234,7 +252,7 @@ class HttpClient implements ClientInterface
     /**
      * @param array<string, mixed> $options
      */
-    public function post(string $uri, array $options = []): HttpResponse
+    public function post(#[\SensitiveParameter] string $uri, #[\SensitiveParameter] array $options = []): HttpResponse
     {
         return $this->request('POST', $uri, $options);
     }
@@ -242,7 +260,7 @@ class HttpClient implements ClientInterface
     /**
      * @param array<string, mixed> $options
      */
-    public function put(string $uri, array $options = []): HttpResponse
+    public function put(#[\SensitiveParameter] string $uri, #[\SensitiveParameter] array $options = []): HttpResponse
     {
         return $this->request('PUT', $uri, $options);
     }
@@ -250,7 +268,7 @@ class HttpClient implements ClientInterface
     /**
      * @param array<string, mixed> $options
      */
-    public function patch(string $uri, array $options = []): HttpResponse
+    public function patch(#[\SensitiveParameter] string $uri, #[\SensitiveParameter] array $options = []): HttpResponse
     {
         return $this->request('PATCH', $uri, $options);
     }
@@ -258,74 +276,104 @@ class HttpClient implements ClientInterface
     /**
      * @param array<string, mixed> $options
      */
-    public function delete(string $uri, array $options = []): HttpResponse
-    {
+    public function delete(
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $options = []
+    ): HttpResponse {
         return $this->request('DELETE', $uri, $options);
     }
 
     /**
      * @param array<string, mixed> $options
      */
-    public function getAsync(string $uri, array $options = []): PromiseInterface
-    {
+    public function getAsync(
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $options = []
+    ): PromiseInterface {
         return $this->requestAsync('GET', $uri, $options);
     }
 
     /**
      * @param array<string, mixed> $options
      */
-    public function headAsync(string $uri, array $options = []): PromiseInterface
-    {
+    public function headAsync(
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $options = []
+    ): PromiseInterface {
         return $this->requestAsync('HEAD', $uri, $options);
     }
 
     /**
      * @param array<string, mixed> $options
      */
-    public function postAsync(string $uri, array $options = []): PromiseInterface
-    {
+    public function postAsync(
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $options = []
+    ): PromiseInterface {
         return $this->requestAsync('POST', $uri, $options);
     }
 
     /**
      * @param array<string, mixed> $options
      */
-    public function putAsync(string $uri, array $options = []): PromiseInterface
-    {
+    public function putAsync(
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $options = []
+    ): PromiseInterface {
         return $this->requestAsync('PUT', $uri, $options);
     }
 
     /**
      * @param array<string, mixed> $options
      */
-    public function patchAsync(string $uri, array $options = []): PromiseInterface
-    {
+    public function patchAsync(
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $options = []
+    ): PromiseInterface {
         return $this->requestAsync('PATCH', $uri, $options);
     }
 
     /**
      * @param array<string, mixed> $options
      */
-    public function deleteAsync(string $uri, array $options = []): PromiseInterface
-    {
+    public function deleteAsync(
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $options = []
+    ): PromiseInterface {
         return $this->requestAsync('DELETE', $uri, $options);
     }
 
     /**
      * @param array<string, mixed> $options
      */
-    public function request(string $method, string $uri, array $options = []): HttpResponse
-    {
+    public function request(
+        string $method,
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $options = []
+    ): HttpResponse {
         return self::await($this->requestAsync($method, $uri, array_merge($options, ['synchronous' => true])));
     }
 
     /**
      * @param array<string, mixed> $options
      */
-    public function requestAsync(string $method, string $uri, array $options = []): PromiseInterface
-    {
+    public function requestAsync(
+        string $method,
+        #[\SensitiveParameter] string $uri,
+        #[\SensitiveParameter] array $options = []
+    ): PromiseInterface {
         return $this->dispatch(
-            static fn(Client $client, array $options) => $client->requestAsync($method, $uri, $options),
+            static function (
+                Client $client,
+                #[\SensitiveParameter] array $options
+            ) use (
+                $method,
+                $uri
+            ): PromiseInterface {
+                // Guzzle validates the request options when it builds the request.
+                // @phpstan-ignore argument.type
+                return $client->requestAsync($method, $uri, $options);
+            },
             $options
         );
     }
@@ -333,18 +381,31 @@ class HttpClient implements ClientInterface
     /**
      * @param array<string, mixed> $options
      */
-    public function send(RequestInterface $request, array $options = []): HttpResponse
-    {
+    public function send(
+        #[\SensitiveParameter] RequestInterface $request,
+        #[\SensitiveParameter] array $options = []
+    ): HttpResponse {
         return self::await($this->sendAsync($request, array_merge($options, ['synchronous' => true])));
     }
 
     /**
      * @param array<string, mixed> $options
      */
-    public function sendAsync(RequestInterface $request, array $options = []): PromiseInterface
-    {
+    public function sendAsync(
+        #[\SensitiveParameter] RequestInterface $request,
+        #[\SensitiveParameter] array $options = []
+    ): PromiseInterface {
         return $this->dispatch(
-            static fn(Client $client, array $options) => $client->sendAsync($request, $options),
+            static function (
+                Client $client,
+                #[\SensitiveParameter] array $options
+            ) use (
+                $request
+            ): PromiseInterface {
+                // Guzzle validates the request options when it sends the request.
+                // @phpstan-ignore argument.type
+                return $client->sendAsync($request, $options);
+            },
             $options
         );
     }
@@ -352,13 +413,14 @@ class HttpClient implements ClientInterface
     /**
      * PSR-18: returns the response for any status code; throws only on transfer errors.
      */
-    public function sendRequest(RequestInterface $request): ResponseInterface
+    #[\Override]
+    public function sendRequest(#[\SensitiveParameter] RequestInterface $request): ResponseInterface
     {
         return $this->send($request, ['allow_redirects' => false, 'http_errors' => false])->toPsrResponse();
     }
 
     /**
-     * Mirrors Guzzle's Client::getConfig(), which Guzzle 8 removes.
+     * Proxies Guzzle's Client::getConfig().
      */
     public function getConfig(?string $option = null): mixed
     {
@@ -371,7 +433,7 @@ class HttpClient implements ClientInterface
      *
      * @param array<int, mixed> $arguments
      */
-    public function __call(string $name, array $arguments): never
+    public function __call(string $name, #[\SensitiveParameter] array $arguments): never
     {
         throw new \BadMethodCallException("Method {$name} does not exist");
     }
@@ -401,8 +463,8 @@ class HttpClient implements ClientInterface
             );
         }
 
-        // Outermost layer: every failure leaves the stack already redacted, including the previous chain
-        // and handler context, so it is safe to log even when taken from getClient() directly.
+        // Outermost layer: every failure leaves the stack already redacted, including the previous chain,
+        // so it is safe to log even when taken from getClient() directly.
         $stack->unshift(self::createRedactionMiddleware($this->redactions), 'solo_redact');
 
         foreach ($this->middlewares as [$middleware, $name]) {
@@ -417,6 +479,8 @@ class HttpClient implements ClientInterface
             $stack->push(Middleware::log($this->logger, new RedactingFormatter($this->redactions)), 'solo_log');
         }
 
+        // Guzzle validates the client options when the client is built.
+        // @phpstan-ignore argument.type
         return new Client(array_merge($this->config, ['handler' => $stack]));
     }
 
@@ -427,7 +491,7 @@ class HttpClient implements ClientInterface
      * @param callable(Client, array<string, mixed>): PromiseInterface $start
      * @param array<string, mixed> $options
      */
-    private function dispatch(callable $start, array $options): PromiseInterface
+    private function dispatch(callable $start, #[\SensitiveParameter] array $options): PromiseInterface
     {
         if (isset($options['headers']) && is_array($options['headers'])) {
             self::assertRequestHeaders($options['headers']);
@@ -473,7 +537,7 @@ class HttpClient implements ClientInterface
      *
      * @param array<array-key, mixed> $headers
      */
-    private function applyHeaders(array $headers): void
+    private function applyHeaders(#[\SensitiveParameter] array $headers): void
     {
         /** @var array<string, string|list<string>> $existing */
         $existing = $this->config['headers'] ?? [];
@@ -505,13 +569,12 @@ class HttpClient implements ClientInterface
 
         $type = $auth[2] ?? 'basic';
         $type = is_string($type) ? strtolower($type) : '';
-        $credentials = "{$auth[0]}:{$auth[1]}";
 
         if ($type === 'basic') {
-            $this->applyHeaders(['Authorization' => 'Basic ' . base64_encode($credentials)]);
+            $this->applyHeaders(['Authorization' => self::basicAuthorization($auth[0], $auth[1])]);
         } elseif (($type === 'digest' || $type === 'ntlm') && \defined('CURLOPT_HTTPAUTH')) {
             $this->authorization = null;
-            $this->curlAuth = [$type === 'digest' ? \CURLAUTH_DIGEST : \CURLAUTH_NTLM, $credentials];
+            $this->curlAuth = [$type === 'digest' ? \CURLAUTH_DIGEST : \CURLAUTH_NTLM, "{$auth[0]}:{$auth[1]}"];
         } else {
             return;
         }
@@ -520,26 +583,46 @@ class HttpClient implements ClientInterface
     }
 
     /**
+     * RFC 7617: the user-id cannot contain a colon, and neither part can contain control characters.
+     * Guzzle applies the same rule to its "auth" option.
+     */
+    private static function basicAuthorization(
+        #[\SensitiveParameter] string $username,
+        #[\SensitiveParameter] string $password
+    ): string {
+        if (str_contains($username, ':') || preg_match('/[\x00-\x1F\x7F]/', $username . $password) !== 0) {
+            throw new \InvalidArgumentException(
+                'Basic auth credentials must not contain control characters, and the username must not contain a colon'
+            );
+        }
+
+        return 'Basic ' . base64_encode("{$username}:{$password}");
+    }
+
+    /**
      * @param list<string>|null $authorization
      * @param array{int, string}|null $curlAuth
      */
     private static function createAuthMiddleware(
-        ?array $authorization,
-        ?array $curlAuth,
+        #[\SensitiveParameter] ?array $authorization,
+        #[\SensitiveParameter] ?array $curlAuth,
         ?UriInterface $origin
     ): callable {
         return static fn(callable $handler): callable => static function (
-            RequestInterface $request,
-            array $options
+            #[\SensitiveParameter] RequestInterface $request,
+            #[\SensitiveParameter] array $options
         ) use (
             $handler,
             $authorization,
             $curlAuth,
             $origin
         ) {
-            if ($origin === null || !UriComparator::isCrossOrigin($origin, $request->getUri())) {
-                // Per-request credentials (an Authorization header or the "auth" option) take precedence.
-                if ($authorization !== null && !$request->hasHeader('Authorization')) {
+            $sameOrigin = $origin === null || !UriComparator::isCrossOrigin($origin, $request->getUri());
+            // Credentials of the request itself, an Authorization header or the "auth" option, take precedence.
+            $ownCredentials = $request->hasHeader('Authorization') || isset($options['auth']);
+
+            if ($sameOrigin && !$ownCredentials) {
+                if ($authorization !== null) {
                     $request = $request->withHeader('Authorization', $authorization);
                 }
 
@@ -558,11 +641,11 @@ class HttpClient implements ClientInterface
     /**
      * @param array<array-key, string> $redactions
      */
-    private static function createRedactionMiddleware(array $redactions): callable
+    private static function createRedactionMiddleware(#[\SensitiveParameter] array $redactions): callable
     {
         return static fn(callable $handler): callable => static function (
-            RequestInterface $request,
-            array $options
+            #[\SensitiveParameter] RequestInterface $request,
+            #[\SensitiveParameter] array $options
         ) use (
             $handler,
             $redactions
@@ -576,9 +659,7 @@ class HttpClient implements ClientInterface
             // Only transfer exceptions are rebuilt (keeping their class); any other reason keeps its class
             // and is redacted by wrapException().
             return $promise->then(null, static fn(mixed $reason): PromiseInterface => Create::rejectionFor(
-                $reason instanceof ConnectException || $reason instanceof GuzzleRequestException
-                    ? Redactor::exception($reason, $redactions)
-                    : $reason
+                $reason instanceof TransferException ? Redactor::exception($reason, $redactions) : $reason
             ));
         };
     }
@@ -592,9 +673,9 @@ class HttpClient implements ClientInterface
         return Middleware::retry(
             static function (
                 int $retries,
-                RequestInterface $request,
+                #[\SensitiveParameter] RequestInterface $request,
                 ?ResponseInterface $response = null,
-                ?\Throwable $exception = null
+                mixed $exception = null
             ) use (
                 $maxRetries,
                 $retryNonIdempotent
@@ -607,7 +688,9 @@ class HttpClient implements ClientInterface
                 $idempotent = $retryNonIdempotent
                     || in_array(strtoupper($request->getMethod()), self::IDEMPOTENT_METHODS, true);
 
-                if ($response === null && $exception instanceof GuzzleRequestException) {
+                // A status a handler reports as an exception is judged by the status. Other response-aware
+                // failures (a transfer broken after the headers) are judged as network errors below.
+                if ($response === null && $exception instanceof BadResponseException) {
                     $response = $exception->getResponse();
                 }
 
@@ -617,11 +700,13 @@ class HttpClient implements ClientInterface
                     return $status === 429 || ($idempotent && $status >= 500);
                 }
 
-                if ($exception === null) {
+                if (!$exception instanceof \Throwable) {
                     return false;
                 }
 
-                return $idempotent || self::wasNotSent($exception);
+                // Guzzle's ConnectException means the connection was never established (DNS, TCP connect,
+                // TLS setup, connect timeout): nothing was sent, so even POST and PATCH are safe to repeat.
+                return $idempotent || $exception instanceof ConnectException;
             },
             static function (int $retries, ?ResponseInterface $response = null) use ($baseDelay, $maxDelay): int {
                 $retryAfter = $response !== null ? self::parseRetryAfter($response) : null;
@@ -635,21 +720,6 @@ class HttpClient implements ClientInterface
                 return min($delay, $maxDelay);
             }
         );
-    }
-
-    /**
-     * cURL errors raised before anything was sent (host not resolved, connection refused, TLS handshake):
-     * the only failures that are safe to retry for POST/PATCH.
-     */
-    private static function wasNotSent(\Throwable $exception): bool
-    {
-        return $exception instanceof ConnectException
-            && \defined('CURLE_COULDNT_CONNECT')
-            && in_array(
-                $exception->getHandlerContext()['errno'] ?? null,
-                [\CURLE_COULDNT_RESOLVE_HOST, \CURLE_COULDNT_CONNECT, \CURLE_SSL_CONNECT_ERROR],
-                true
-            );
     }
 
     /**
@@ -681,7 +751,7 @@ class HttpClient implements ClientInterface
      * @param array<array-key, mixed> $data
      * @return list<array{name: string, contents: mixed}>
      */
-    private static function multipartFields(array $data, string $prefix = ''): array
+    private static function multipartFields(#[\SensitiveParameter] array $data, string $prefix = ''): array
     {
         $fields = [];
 
@@ -718,7 +788,7 @@ class HttpClient implements ClientInterface
      * @param array<array-key, mixed> $parts
      * @return list<array<string, mixed>>
      */
-    private static function prepareMultipart(array $parts): array
+    private static function prepareMultipart(#[\SensitiveParameter] array $parts): array
     {
         /** @var list<array{name: string, contents: mixed, filename?: string, headers?: array<string, string>}> */
         $fields = [];
@@ -795,7 +865,7 @@ class HttpClient implements ClientInterface
      *
      * @return list<string>
      */
-    private static function assertHeaderValues(string $name, mixed $value): array
+    private static function assertHeaderValues(string $name, #[\SensitiveParameter] mixed $value): array
     {
         $values = [];
         foreach (is_array($value) ? $value : [$value] as $item) {
@@ -815,43 +885,36 @@ class HttpClient implements ClientInterface
     }
 
     /**
-     * Per-request headers are passed to Guzzle as given (Guzzle also accepts numbers and null), but are
-     * checked first: Guzzle's own message would contain the invalid value, often a token.
+     * Per-request headers are passed to Guzzle as given, but are checked first by the same rule as
+     * withHeaders(), which is Guzzle's: Guzzle's own message could contain the invalid value, often a token.
      *
      * @param array<array-key, mixed> $headers
      */
-    private static function assertRequestHeaders(array $headers): void
+    private static function assertRequestHeaders(#[\SensitiveParameter] array $headers): void
     {
         foreach ($headers as $name => $value) {
-            $name = self::assertHeaderName((string) $name);
-            foreach (is_array($value) ? $value : [$value] as $item) {
-                if (
-                    !(is_scalar($item) || $item === null)
-                    || preg_match(self::HEADER_VALUE_PATTERN, (string) $item) !== 1
-                ) {
-                    throw new \InvalidArgumentException(
-                        "Header {$name} must be a scalar without control characters"
-                    );
-                }
-            }
+            self::assertHeaderValues(self::assertHeaderName((string) $name), $value);
         }
     }
 
     /**
      * Transfer errors arrive already redacted by the "solo_redact" middleware; the message is redacted
      * again for the ones that never passed it (thrown before the request started, or left untouched
-     * because of an unexpected constructor).
+     * because of an unexpected constructor). The PSR-18 interfaces decide the class: Guzzle's
+     * NetworkException (no response) becomes NetworkException, its RequestException RequestException.
      *
      * @param array<array-key, string> $redactions
      */
-    private static function wrapException(GuzzleException $e, array $redactions): HttpClientException
-    {
+    private static function wrapException(
+        GuzzleException $e,
+        #[\SensitiveParameter] array $redactions
+    ): HttpClientException {
         $code = (int) $e->getCode();
         $message = 'HTTP request failed: ' . Redactor::message($e->getMessage(), $redactions);
 
         return match (true) {
-            $e instanceof ConnectException => new NetworkException($e->getRequest(), $message, $code, $e),
-            $e instanceof GuzzleRequestException => new RequestException($e->getRequest(), $message, $code, $e),
+            $e instanceof NetworkExceptionInterface => new NetworkException($e->getRequest(), $message, $code, $e),
+            $e instanceof RequestExceptionInterface => new RequestException($e->getRequest(), $message, $code, $e),
             default => new HttpClientException($message, $code, $e),
         };
     }
@@ -871,6 +934,7 @@ class HttpClient implements ClientInterface
              * @param mixed $level
              * @param array<mixed> $context
              */
+            #[\Override]
             public function log($level, string|\Stringable $message, array $context = []): void
             {
                 if ($this->callback === null) {

@@ -39,7 +39,7 @@ final class LoggingTest extends TestCase
             }
         };
 
-        $client = $this->client([self::ok(), self::connectError(7)])->withLogging($logger);
+        $client = $this->client([self::ok(), self::connectError()])->withLogging($logger);
         $client->get('/ok');
         try {
             $client->get('/fail?token=SECRET');
@@ -69,7 +69,7 @@ final class LoggingTest extends TestCase
     public function testWithRedactionMasksPathSecretsInLogsAndExceptions(): void
     {
         $lines = [];
-        $client = $this->client([self::ok(), self::connectError(7)])
+        $client = $this->client([self::ok(), self::connectError()])
             ->withRedaction('123456:SECRET-TOKEN', '')
             ->withLogging(self::collectInto($lines));
 
@@ -100,7 +100,7 @@ final class LoggingTest extends TestCase
     public function testExceptionMessageDoesNotContainQuerySecrets(): void
     {
         try {
-            $this->client([self::connectError(7)])->get('/x?api_key=SECRET');
+            $this->client([self::connectError()])->get('/x?api_key=SECRET');
             self::fail('Expected exception');
         } catch (NetworkException $e) {
             self::assertStringContainsString('https://api.test/x?api_key=***', $e->getMessage());
