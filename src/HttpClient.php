@@ -29,6 +29,7 @@ use Solo\HttpClient\Exception\HttpClientException;
 use Solo\HttpClient\Exception\NetworkException;
 use Solo\HttpClient\Exception\RequestException;
 use Solo\HttpClient\Internal\HeaderParam;
+use Solo\HttpClient\Internal\PublicHostGuard;
 use Solo\HttpClient\Internal\RedactingFormatter;
 use Solo\HttpClient\Internal\Redactor;
 
@@ -63,6 +64,8 @@ class HttpClient implements ClientInterface
     private ?LoggerInterface $logger = null;
     /** @var array<array-key, string> Secrets to mask in logs and exception messages, for strtr() */
     private array $redactions = [];
+    /** @var (callable(string): list<string>)|null Host resolver of withPublicHostsOnly(); null while it is off */
+    private $hostResolver = null;
 
     /**
      * @param array<string, mixed> $config Guzzle options; a custom "handler" is honored
@@ -200,6 +203,26 @@ class HttpClient implements ClientInterface
     {
         $clone = clone $this;
         $clone->middlewares[] = [$middleware, $name];
+        return $clone;
+    }
+
+    /**
+     * Sends requests only to public IP addresses, for URLs that come from users. A host that is not a public
+     * address and does not resolve to one is refused with BlockedHostException before anything is sent. Every
+     * redirect hop and every retry is checked, and the connection is pinned to the checked address with
+     * CURLOPT_CONNECT_TO, so DNS rebinding cannot swap in another one. Requires the cURL extension.
+     *
+     * @param (callable(string): list<string>)|null $resolver Returns the IP addresses of a host name;
+     *     by default its A and AAAA records from DNS
+     */
+    public function withPublicHostsOnly(?callable $resolver = null): static
+    {
+        if (!\defined('CURLOPT_CONNECT_TO')) {
+            throw new \LogicException('withPublicHostsOnly() requires the cURL extension');
+        }
+
+        $clone = clone $this;
+        $clone->hostResolver = $resolver ?? PublicHostGuard::dns(...);
         return $clone;
     }
 
@@ -477,6 +500,11 @@ class HttpClient implements ClientInterface
 
         if ($this->logger !== null) {
             $stack->push(Middleware::log($this->logger, new RedactingFormatter($this->redactions)), 'solo_log');
+        }
+
+        if ($this->hostResolver !== null) {
+            // Innermost layer: every attempt of every redirect hop is checked and pinned as it reaches the handler.
+            $stack->push(PublicHostGuard::middleware($this->hostResolver, $this->redactions), 'solo_public_hosts');
         }
 
         // Guzzle validates the client options when the client is built.

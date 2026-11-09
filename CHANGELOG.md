@@ -1,5 +1,20 @@
 # Changelog
 
+## 5.0.0-RC2
+
+### Added
+
+- **`withPublicHostsOnly()` against server-side request forgery (SSRF).** URLs that users supply, such as webhooks,
+  feed imports and image downloads, can be kept to public IP addresses. A host that is not a public address and does
+  not resolve to one is refused before anything is sent, with the new `BlockedHostException`, a `RequestException`
+  that names the host and the address. Refused are loopback, private networks, link-local addresses including the
+  cloud metadata service at 169.254.169.254, carrier-grade NAT (100.64.0.0/10), the other IPv4 special-purpose
+  ranges, every IPv6 address outside global unicast, IPv4-mapped and NAT64 forms of refused IPv4 addresses, and
+  numeric spellings such as `2130706433`. Every redirect hop and every retry is checked again, and the connection
+  is pinned to the checked address with `CURLOPT_CONNECT_TO`, so DNS rebinding cannot swap in another address.
+  Host names resolve to their A and AAAA records from DNS, or through a resolver you pass. Requires the cURL
+  extension.
+
 ## 5.0.0-RC1
 
 Built on Guzzle 8. Request options, middleware, handlers, promises, `getClient()` and the Guzzle exceptions in

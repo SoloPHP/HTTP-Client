@@ -10,7 +10,8 @@ This reference describes Solo HTTP Client 5.0: PHP 8.3+, `guzzlehttp/guzzle` 8.3
 | `Exception\HttpClientException` | Base exception; PSR-18 `ClientExceptionInterface` |
 | `Exception\NetworkException` | The network failed; PSR-18 `NetworkExceptionInterface` |
 | `Exception\RequestException` | The request failed otherwise; PSR-18 `RequestExceptionInterface` |
-| `Exception\RequestAwareException` | Abstract base of the two above, with `getRequest()` |
+| `Exception\BlockedHostException` | A `RequestException`: `withPublicHostsOnly()` refused a host that is not public |
+| `Exception\RequestAwareException` | Abstract base of `NetworkException` and `RequestException`, with `getRequest()` |
 
 Classes in `Solo\HttpClient\Internal` and `File::openStream()` are marked `@internal` and are not part of the public API.
 
@@ -61,6 +62,9 @@ public function retry(
 public function withLogging(LoggerInterface|callable|null $logger = null): static
 public function withRedaction(string ...$secrets): static
 public function withMiddleware(callable $middleware, string $name = ''): static
+
+/** @param (callable(string): list<string>)|null $resolver */
+public function withPublicHostsOnly(?callable $resolver = null): static
 ```
 
 Each method returns a new client and leaves the current one unchanged.
@@ -75,6 +79,7 @@ Each method returns a new client and leaves the current one unchanged.
 | `withLogging()` | Replaces the logger. A PSR-3 logger receives `info` for responses and `error` for failed transfers; a callable receives the line as its only argument; `null` writes `[HttpClient] INFO: <line>` or `[HttpClient] ERROR: <line>` with `error_log()` |
 | `withRedaction()` | Adds secrets to mask in log lines and exception messages, together with their URL-encoded forms. Empty strings are ignored |
 | `withMiddleware()` | Adds a [Guzzle middleware](https://docs.guzzlephp.org/en/stable/handlers-and-middleware.html). Middleware run in the order added, inside the credential and redirect layers and outside retries and logging |
+| `withPublicHostsOnly()` | Sends requests, redirect hops and retries only to public IP addresses, and pins each connection to the checked address with `CURLOPT_CONNECT_TO`; any other host throws `BlockedHostException` before anything is sent to it. `$resolver` receives a host name and returns its IP addresses as strings, an empty array when it does not resolve; by default they are the A and AAAA records from DNS. Throws `LogicException` without the cURL extension. [Public hosts only](details.md#public-hosts-only) gives the rules |
 
 An invalid header name or value throws `InvalidArgumentException`. The message names the header, never the value.
 
@@ -103,6 +108,7 @@ public function send(RequestInterface $request, array $options = []): HttpRespon
 |---|---|
 | `NetworkException` | No response: the host did not resolve, the connection or the TLS handshake failed, sending or receiving failed, or a timeout came before the response |
 | `RequestException` | Another transfer failure, such as too many redirects or a response that broke off, or an error status when the request sets `http_errors` |
+| `BlockedHostException` | After `withPublicHostsOnly()`, the host of the request or of a redirect target is not a public address and does not resolve to one; nothing is sent to it |
 | `HttpClientException` | Any other Guzzle exception, such as an invalid request option |
 | `InvalidArgumentException` | An invalid header or invalid multipart data, before anything is sent |
 
@@ -244,10 +250,11 @@ Without a MIME type, Guzzle derives the part's `Content-Type` from the file name
 
 ```text
 RuntimeException
-└── HttpClientException          Psr\Http\Client\ClientExceptionInterface
-    └── RequestAwareException    abstract; getRequest()
-        ├── NetworkException     Psr\Http\Client\NetworkExceptionInterface
-        └── RequestException     Psr\Http\Client\RequestExceptionInterface
+└── HttpClientException              Psr\Http\Client\ClientExceptionInterface
+    └── RequestAwareException        abstract; getRequest()
+        ├── NetworkException         Psr\Http\Client\NetworkExceptionInterface
+        └── RequestException         Psr\Http\Client\RequestExceptionInterface
+            └── BlockedHostException getHost(), getAddress()
 ```
 
 | Exception | Wraps |
@@ -261,7 +268,22 @@ RuntimeException
 - `getPrevious()` is the Guzzle exception, redacted, with its response when it is a `ResponseException`.
 - `getRequest()` returns the request that failed, unchanged.
 
-Exceptions that do not come from Guzzle, such as a `LogicException` thrown by your own middleware, reach the caller unchanged.
+Exceptions that do not come from Guzzle, such as a `LogicException` thrown by your own middleware or resolver, reach the caller unchanged.
+
+### BlockedHostException
+
+```php
+public function getHost(): string
+public function getAddress(): string
+```
+
+A client restricted with `withPublicHostsOnly()` throws it, or rejects the promise with it, when the host of a request or of a redirect target is not a public address and does not resolve to one. Nothing is sent to that host, and the refusal is neither retried nor logged.
+
+- `getHost()` is the host as the URI names it, such as `intranet.example.com`, `2130706433` or `[::1]`.
+- `getAddress()` is the address that is not public: the host itself, or the first address it resolves to.
+- `getRequest()` returns the refused request: the redirect target when a redirect was refused.
+- `getMessage()` names both, with registered secrets masked, such as `HTTP request refused: intranet.example.com resolves to 10.0.0.5, which is not a public address`.
+- `getCode()` is `0`, and there is no previous exception.
 
 ## Log line
 
@@ -285,3 +307,5 @@ The URI and the error message are redacted as described in [Redaction](details.m
 - `getRequest()` returns the request with all its headers, `Authorization` included. Do not serialize it into logs.
 - POST and PATCH are recognized as unsent through Guzzle's `ConnectException`. A custom handler must report connection failures with it for those retries to happen.
 - Digest and NTLM credentials set on the client need the cURL extension. A request's own `auth` option follows Guzzle 8, which implements Digest itself and has no NTLM.
+- `withPublicHostsOnly()` needs the cURL handler to pin connections. Guzzle's stream handler, which serves requests with the `stream` option, refuses restricted requests with an `HttpClientException`.
+- `withPublicHostsOnly()` resolves host names with a blocking DNS lookup, bounded by the system resolver's timeouts rather than the `timeout` option. An asynchronous request resolves its host when it starts.

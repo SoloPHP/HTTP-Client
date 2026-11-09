@@ -210,6 +210,42 @@ wrappers such as `php://`, `http://` and `phar://`. Names and file names are
 percent-encoded where needed, so `John's "CV".pdf` is sent as
 `John's %22CV%22.pdf` and cannot inject part headers.
 
+## Fetch URLs from users
+
+A webhook, a feed import or an avatar download requests a URL that a user
+typed, and that URL can point inside your network: `http://127.0.0.1:6379/`,
+`http://10.0.0.5/admin`, or the cloud metadata service at
+`http://169.254.169.254/` that hands out credentials. `withPublicHostsOnly()`
+sends requests only to public IP addresses:
+
+```php
+use Solo\HttpClient\Exception\BlockedHostException;
+
+$fetcher = HttpClient::create()->timeout(10)->withPublicHostsOnly();
+
+try {
+    $feed = $fetcher->get($feedUrl);
+} catch (BlockedHostException $e) {
+    $e->getHost();    // 'intranet.example.com'
+    $e->getAddress(); // '10.0.0.5', the address that is not public
+}
+```
+
+The client resolves the host itself, skips addresses that are not public and
+connects to the first public one. A host without one is refused before
+anything is sent, and so is a redirect to such a host: every redirect hop and
+every retry is checked again. The connection is pinned to the checked
+address, so a DNS server that answers with a public address for the check and
+with a private one right after, which is called DNS rebinding, cannot send the
+request elsewhere. A host that does not resolve fails with `NetworkException`,
+as it does without the restriction.
+
+Keep a separate client for your own services, which usually live at private
+addresses. The restriction needs the cURL extension, and a request with the
+`stream` option fails, because Guzzle's stream handler cannot pin a
+connection. [Public hosts only](details.md#public-hosts-only) lists the
+address ranges and the rules.
+
 ## Log requests
 
 ```php
@@ -266,10 +302,11 @@ Error statuses are responses. Exceptions mean that the transfer itself failed:
 | --- | --- |
 | No response: the host did not resolve, the connection failed, sending or receiving failed, or a timeout came before the response | `NetworkException`, a PSR-18 `NetworkExceptionInterface` |
 | Another transfer failure, such as too many redirects or a response that broke off | `RequestException`, a PSR-18 `RequestExceptionInterface` |
+| After `withPublicHostsOnly()`, a host or a redirect target that is not a public address | `BlockedHostException`, a `RequestException`, before anything is sent to it |
 | Any other Guzzle error | `HttpClientException`, a PSR-18 `ClientExceptionInterface` |
 | An invalid header, unsupported multipart data, a missing file | `InvalidArgumentException`, before anything is sent |
 
-The first three live in `Solo\HttpClient\Exception`. `NetworkException` and
+The first four live in `Solo\HttpClient\Exception`. `NetworkException` and
 `RequestException` extend `HttpClientException`, which extends
 `RuntimeException`.
 
@@ -316,7 +353,7 @@ $api->get('users/42')->json('id'); // 42
 ```
 
 The client keeps its own layers around a custom handler: credentials, retries,
-logging and redaction work as they do in production. To inspect what was sent,
+logging, redaction and the public-host check work as they do in production. To inspect what was sent,
 add Guzzle's history middleware:
 
 ```php
@@ -327,6 +364,18 @@ $api = $api->withMiddleware(Middleware::history($history));
 
 $api->get('users/42');
 $history[0]['request']->getHeaderLine('Authorization');
+```
+
+A client restricted with `withPublicHostsOnly()` still resolves host names
+through DNS. Pass a resolver that answers from a table instead, so the test
+stays offline:
+
+```php
+$fetcher = $api->withPublicHostsOnly(static fn(string $host): array => match ($host) {
+    'feeds.example.com' => ['93.184.216.34'],
+    'intranet.example.com' => ['10.0.0.5'],
+    default => [], // does not resolve
+});
 ```
 
 ## Further reading

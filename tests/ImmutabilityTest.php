@@ -39,6 +39,7 @@ final class ImmutabilityTest extends TestCase
         yield 'withMiddleware' => [static fn(HttpClient $c) => $c->withMiddleware(Middleware::mapRequest(
             static fn($r) => $r
         ))];
+        yield 'withPublicHostsOnly' => [static fn(HttpClient $c) => $c->withPublicHostsOnly()];
     }
 
     /**
