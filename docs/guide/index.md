@@ -8,8 +8,8 @@ well.
 
 ## Install
 
-PHP 8.1+ is required. Composer installs Guzzle 7.15.2+, `psr/http-client` and
-`psr/log` with the package.
+PHP 8.3+ is required. Composer installs Guzzle 8.3+ with its PSR-7 and promise
+libraries, `psr/http-client` and `psr/log` with the package.
 
 ```sh
 composer require solophp/http-client
@@ -131,6 +131,9 @@ $api = $api->withToken($token, 'Token');      // Authorization: Token <token>
 $api = $api->withBasicAuth('user', 'secret'); // Authorization: Basic dXNlcjpzZWNyZXQ=
 ```
 
+As RFC 7617 requires, a username cannot contain a colon, and neither part can
+contain a control character.
+
 Credentials set on the client go only to the origin of the base URI: the same
 scheme, host and port. This covers these methods, an `Authorization` header in
 `withHeaders()` or in the constructor options, and Guzzle's `auth` option,
@@ -162,10 +165,10 @@ $api = $api->retry(0);              // off again
 
 GET, HEAD, OPTIONS, TRACE, PUT and DELETE are retried after a network error, a
 429 and a 5xx response. POST and PATCH are retried after a 429, or when the
-request never left the client: the host did not resolve, the connection was
-refused or the TLS handshake failed. A timeout or a 5xx may come after the
-server has already processed the request, and repeating it could charge a card
-twice. If the API supports idempotency keys, allow those retries explicitly:
+connection was never established: the host did not resolve, the connection was
+refused or timed out, or the TLS handshake failed. A later timeout or a 5xx may
+come after the server has already processed the request, and repeating it could
+charge a card twice. If the API supports idempotency keys, allow those retries explicitly:
 
 ```php
 $payments = $api->retry(3, 1000, retryNonIdempotent: true);
@@ -206,6 +209,63 @@ $api->postMultipart('profile', $request->getParsedBody()); // text fields only
 wrappers such as `php://`, `http://` and `phar://`. Names and file names are
 percent-encoded where needed, so `John's "CV".pdf` is sent as
 `John's %22CV%22.pdf` and cannot inject part headers.
+
+## Fetch URLs from users
+
+A webhook, a feed import or an avatar download requests a URL that a user
+typed, and that URL can point inside your network: `http://127.0.0.1:6379/`,
+`http://10.0.0.5/admin`, or the cloud metadata service at
+`http://169.254.169.254/` that hands out credentials. `withPublicHostsOnly()`
+sends requests only to public IP addresses:
+
+```php
+use Solo\HttpClient\Exception\BlockedHostException;
+
+$fetcher = HttpClient::create()->timeout(10)->withPublicHostsOnly();
+
+try {
+    $feed = $fetcher->get($feedUrl);
+} catch (BlockedHostException $e) {
+    $e->getHost();    // 'intranet.example.com'
+    $e->getAddress(); // '10.0.0.5', the address that is not public
+}
+```
+
+The client resolves the host itself, skips addresses that are not public and
+connects to the first public one. A host without one is refused before
+anything is sent, and so is a redirect to such a host: every redirect hop and
+every retry is checked again. The connection is pinned to the checked
+address, so a DNS server that answers with a public address for the check and
+with a private one right after, which is called DNS rebinding, cannot send the
+request elsewhere. A host that does not resolve fails with `NetworkException`,
+as it does without the restriction.
+
+Keep a separate client for your own services, which usually live at private
+addresses. The restriction needs the cURL extension, and a request with the
+`stream` option fails, because Guzzle's stream handler cannot pin a
+connection. [Public hosts only](details.md#public-hosts-only) lists the
+address ranges and the rules.
+
+Such a URL can also serve far more than you expect, and a few kilobytes of
+gzip can expand to gigabytes. `withMaxResponseSize()` refuses a response whose
+body is larger than the limit:
+
+```php
+use Solo\HttpClient\Exception\ResponseTooLargeException;
+
+$fetcher = $fetcher->withMaxResponseSize(10 * 1024 * 1024);
+
+try {
+    $fetcher->get($feedUrl, ['sink' => $path]);
+} catch (ResponseTooLargeException $e) {
+    $e->getLimit(); // 10485760
+}
+```
+
+A response that announces a larger `Content-Length` is refused as soon as its
+headers arrive. Otherwise the body is counted after decoding as it is written,
+and the sink never receives the bytes past the limit. The refusal is not
+retried. [Response size](details.md#response-size) gives the rules.
 
 ## Log requests
 
@@ -261,23 +321,31 @@ Error statuses are responses. Exceptions mean that the transfer itself failed:
 
 | Problem | Exception |
 | --- | --- |
-| The host did not resolve, the connection failed or timed out | `NetworkException`, a PSR-18 `NetworkExceptionInterface` |
-| Another transfer failure, such as too many redirects | `RequestException`, a PSR-18 `RequestExceptionInterface` |
-| Any other Guzzle error | `HttpClientException`, a PSR-18 `ClientExceptionInterface` |
+| No response: the host did not resolve, the connection failed, sending or receiving failed, or a timeout came before the response | `NetworkException`, a PSR-18 `NetworkExceptionInterface` |
+| Another transfer failure, such as too many redirects or a response that broke off | `RequestException`, a PSR-18 `RequestExceptionInterface` |
+| A timeout, before the response or after its headers | `NetworkTimeoutException` or `ResponseTimeoutException`, both `TimeoutException` |
+| After `withPublicHostsOnly()`, a host or a redirect target that is not a public address | `BlockedHostException`, a `RequestException`, before anything is sent to it |
+| After `withMaxResponseSize()`, a response larger than the limit | `ResponseTooLargeException`, a `RequestException` |
+| A URL that does not parse, or any other Guzzle error | `HttpClientException`, a PSR-18 `ClientExceptionInterface` |
 | An invalid header, unsupported multipart data, a missing file | `InvalidArgumentException`, before anything is sent |
 
-The first three live in `Solo\HttpClient\Exception`. `NetworkException` and
-`RequestException` extend `HttpClientException`, which extends
-`RuntimeException`.
+All but `InvalidArgumentException` live in `Solo\HttpClient\Exception`.
+`NetworkException` and `RequestException` extend `HttpClientException`, which
+extends `RuntimeException`. The timeouts are a `NetworkException` and a
+`RequestException`, so catch `TimeoutException` before them:
 
 ```php
 use Solo\HttpClient\Exception\HttpClientException;
 use Solo\HttpClient\Exception\NetworkException;
+use Solo\HttpClient\Exception\TimeoutException;
 
 try {
     $response = $api->get('users/42');
+} catch (TimeoutException $e) {
+    // before the response or after its headers: the API is too slow
+    throw new ServiceUnavailable('The users API timed out', previous: $e);
 } catch (NetworkException $e) {
-    // DNS, connection or timeout: the API is unreachable
+    // no response: the API is unreachable
     throw new ServiceUnavailable('The users API is unreachable', previous: $e);
 } catch (HttpClientException $e) {
     $logger->error('The users API request failed', ['exception' => $e]);
@@ -289,9 +357,11 @@ if ($response->status() === 404) {
 }
 ```
 
-The message, the handler context and the chain of previous exceptions are
-redacted like log lines, so an exception can go to a logger or an error tracker
-as it is. [Redaction](details.md#redaction) explains what is masked.
+The message and the chain of previous exceptions are
+redacted like log lines, and parameters that carry secrets, such as the URI and
+the options, are hidden in stack traces. An exception can go to a logger or an
+error tracker as it is. [Redaction](details.md#redaction) explains what is
+masked.
 
 ## Test code that uses the client
 
@@ -311,7 +381,7 @@ $api->get('users/42')->json('id'); // 42
 ```
 
 The client keeps its own layers around a custom handler: credentials, retries,
-logging and redaction work as they do in production. To inspect what was sent,
+logging, redaction and the public-host check work as they do in production. To inspect what was sent,
 add Guzzle's history middleware:
 
 ```php
@@ -324,8 +394,20 @@ $api->get('users/42');
 $history[0]['request']->getHeaderLine('Authorization');
 ```
 
+A client restricted with `withPublicHostsOnly()` still resolves host names
+through DNS. Pass a resolver that answers from a table instead, so the test
+stays offline:
+
+```php
+$fetcher = $api->withPublicHostsOnly(static fn(string $host): array => match ($host) {
+    'feeds.example.com' => ['93.184.216.34'],
+    'intranet.example.com' => ['10.0.0.5'],
+    default => [], // does not resolve
+});
+```
+
 ## Further reading
 
 - [Public API reference](api.md)
 - [Behavior in detail](details.md)
-- [Upgrading from 3.x](https://github.com/SoloPHP/HTTP-Client/blob/main/CHANGELOG.md#upgrading-from-3x)
+- [Upgrading from 4.x](https://github.com/SoloPHP/HTTP-Client/blob/main/CHANGELOG.md#upgrading-from-4x)

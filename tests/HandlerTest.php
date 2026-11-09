@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Solo\HttpClient\Tests;
 
+use GuzzleHttp\Client;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
@@ -25,8 +26,7 @@ final class HandlerTest extends TestCase
 
     public function testCustomHandlerStackIsHonoredAndNotMutated(): void
     {
-        $stack = HandlerStack::create($this->recordingHandler([self::ok()]));
-        $before = (string) $stack;
+        $stack = HandlerStack::create($this->recordingHandler([self::ok(), self::ok()]));
 
         (new HttpClient('https://api.test', ['handler' => $stack]))
             ->retry(1)
@@ -36,7 +36,12 @@ final class HandlerTest extends TestCase
             ->get('/');
 
         self::assertCount(1, $this->sent);
-        self::assertSame($before, (string) $stack);
+        self::assertTrue($this->sentRequest()->hasHeader('Authorization'));
+
+        // The caller's stack got none of the client's layers: a plain Guzzle client sends no token.
+        (new Client(['handler' => $stack]))->request('GET', 'https://api.test/');
+        self::assertCount(2, $this->sent);
+        self::assertFalse($this->sentRequest(1)->hasHeader('Authorization'));
     }
 
     public function testWithMiddlewareIsApplied(): void

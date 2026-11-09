@@ -1,5 +1,130 @@
 # Changelog
 
+## 5.0.0-RC4
+
+### Fixed
+
+- **A body that failed to read is no longer taken for the body.** `HttpResponse::json()` does not cache `null` after
+  a failed read, and for a non-seekable body `body()` and `json()` throw the same exception again instead of
+  returning what was left after the failure.
+- **Streamed responses under `withMaxResponseSize()`** ask the body for at most one byte past the limit instead of
+  allocating the buffer the caller requested. The body is counted by its position, so seeking back and reading it
+  again within the limit is allowed.
+- **Registered secrets in host names stay out of stack traces**, also with `zend.exception_ignore_args` off: in a
+  refusal of `withPublicHostsOnly()`, and when its resolver answers with something other than IP addresses.
+
+## 5.0.0-RC3
+
+### Added
+
+- **`withMaxResponseSize()`** refuses a response whose body is larger than the limit with the new
+  `ResponseTooLargeException`, a `RequestException` with `getLimit()`: by its `Content-Length` as soon as the headers
+  arrive, otherwise once the body goes past the limit. The body is counted as it is written to the sink, after
+  decoding, so a small compressed response cannot expand past the limit, and a sink never receives the bytes past
+  it; a streamed body is counted as it is read. The refusal is not retried. Guzzle 8 refuses
+  `CURLOPT_MAXFILESIZE_LARGE` in the `curl` option, so this is the way to cap a download.
+- **Timeouts have their own classes.** `NetworkTimeoutException`, a `NetworkException`, for a timeout before the
+  response, and `ResponseTimeoutException`, a `RequestException`, for one after its headers, share the
+  `TimeoutException` interface. Guzzle 8 exceptions have no handler context to read the cURL error from.
+
+### Changed
+
+- **Retries skip failures that would only repeat.** A transfer that a callback, the sink or `withMaxResponseSize()`
+  stopped, and a request that Guzzle refuses, are no longer retried. Network errors and responses that broke off
+  after their headers are retried as before.
+- **A URL that does not parse** throws `HttpClientException` with Guzzle's `MalformedUriException` in
+  `getPrevious()`, both redacted, instead of the bare `MalformedUriException`: URLs that users supply fail like any
+  other request.
+- **One DNS query per host in the usual case.** `withPublicHostsOnly()` asks for the AAAA records of a host only when
+  none of its A records is public, and only for the family that `force_ip_resolve` names.
+
+## 5.0.0-RC2
+
+### Added
+
+- **`withPublicHostsOnly()` against server-side request forgery (SSRF).** URLs that users supply, such as webhooks,
+  feed imports and image downloads, can be kept to public IP addresses. A host that is not a public address and does
+  not resolve to one is refused before anything is sent, with the new `BlockedHostException`, a `RequestException`
+  that names the host and the address. Refused are loopback, private networks, link-local addresses including the
+  cloud metadata service at 169.254.169.254, carrier-grade NAT (100.64.0.0/10), the other IPv4 special-purpose
+  ranges, every IPv6 address outside global unicast, IPv4-mapped and NAT64 forms of refused IPv4 addresses, and
+  numeric spellings such as `2130706433`. Every redirect hop and every retry is checked again, and the connection
+  is pinned to the checked address with `CURLOPT_CONNECT_TO`, so DNS rebinding cannot swap in another address.
+  Host names resolve to their A and AAAA records from DNS, or through a resolver you pass. Requires the cURL
+  extension.
+
+## 5.0.0-RC1
+
+Built on Guzzle 8. Request options, middleware, handlers, promises, `getClient()` and the Guzzle exceptions in
+`getPrevious()` follow Guzzle 8; see [Upgrading from 4.x](#upgrading-from-4x).
+
+### Changed
+
+- **PHP 8.3 or later** is required.
+- **Guzzle 8.3** with `guzzlehttp/psr7` 3.2 and `guzzlehttp/promises` 3.1 replaces Guzzle 7.
+- **Exceptions follow Guzzle 8's classification.** `NetworkException` now covers every failure without a response,
+  including send and receive errors that were `RequestException`. `RequestException` covers request failures and
+  responses that broke off: a timeout after the response headers is now `RequestException`, with the response in
+  `getPrevious()`.
+- **Retries.** "Not sent" means Guzzle's `ConnectException`, so POST and PATCH are also retried after a connect
+  timeout, with any handler rather than only on cURL errors 6, 7 and 35. A response that breaks off after its
+  headers is retried for GET, HEAD, OPTIONS, TRACE, PUT and DELETE.
+- **Per-request header values** must be strings or non-empty lists of strings, as Guzzle 8 requires.
+- **Basic credentials** in `withBasicAuth()` and the `auth` option follow RFC 7617, as in Guzzle 8: a colon in the
+  username or a control character is rejected.
+- **A request's own `auth` option** takes precedence over the client's credentials. Guzzle 8 applies it inside the
+  handler stack, after the client adds its credentials.
+
+### Security
+
+- **Secrets stay out of stack traces.** Parameters that can carry secrets are marked `#[\SensitiveParameter]`: URIs,
+  request options, headers, tokens, passwords, redaction secrets and multipart data. Stack traces show them as
+  `SensitiveParameterValue` even when `zend.exception_ignore_args` is off.
+
+### Removed
+
+- Redaction of the handler context: Guzzle 8 exceptions have none.
+
+## Upgrading from 4.x
+
+1. **Require PHP 8.3 and allow Guzzle 8.** Packages that pin `guzzlehttp/guzzle` ^7, `guzzlehttp/psr7` ^2 or
+   `guzzlehttp/promises` ^2 must allow the new majors first.
+
+2. **Read Guzzle's [7.0 to 8.0 upgrade guide](https://github.com/guzzle/guzzle/blob/8.3.1/UPGRADING.md)** for the
+   request options, middleware and handlers you pass to the client.
+
+3. **Review catch blocks.** Send and receive errors are `NetworkException` now, and a timeout after the response
+   headers is `RequestException`. Catch `HttpClientException` to handle every transfer failure:
+
+   ```php
+   try {
+       $response = $client->get('/users');
+   } catch (NetworkException $e) {
+       // no response: DNS, connection, send or receive error, timeout before the response
+   } catch (HttpClientException $e) {
+       // any other transfer failure
+   }
+   ```
+
+4. **Guzzle exceptions in `getPrevious()`** have no `getHandlerContext()`. `getResponse()` exists only on Guzzle's
+   `ResponseException` and its subclasses. Catch `TimeoutException` to tell a timeout apart, and read anything else
+   about the transfer through Guzzle's `on_stats` option.
+
+5. **Cap downloads with `withMaxResponseSize()`.** Guzzle 8 refuses `CURLOPT_MAXFILESIZE_LARGE`, like other raw cURL
+   options outside its allow-list, in the `curl` option, and every request that passes it fails.
+
+6. **Per-request header values must be strings:**
+
+   ```php
+   // 4.x
+   $client->get('/items', ['headers' => ['X-Page' => 2]]);
+
+   // 5.0
+   $client->get('/items', ['headers' => ['X-Page' => '2']]);
+   ```
+
+7. **Basic auth usernames cannot contain a colon.** The server would split such a username at the colon.
+
 ## 4.0.1
 
 ### Security

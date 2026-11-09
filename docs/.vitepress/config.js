@@ -22,17 +22,17 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/' },
       { text: 'API', link: '/guide/api' },
       { text: 'Details', link: '/guide/details' },
-      { text: 'v4.0.1', link: 'https://github.com/SoloPHP/HTTP-Client/releases' },
+      { text: 'v5.0.0-RC4', link: 'https://github.com/SoloPHP/HTTP-Client/releases' },
     ],
 
     sidebar: [
       {
-        text: 'Solo HTTP Client · 4.0',
+        text: 'Solo HTTP Client · 5.0',
         items: [
           { text: 'Getting started', link: '/guide/' },
           { text: 'API reference', link: '/guide/api' },
           { text: 'Behavior in detail', link: '/guide/details' },
-          { text: 'Upgrading from 3.x', link: 'https://github.com/SoloPHP/HTTP-Client/blob/main/CHANGELOG.md#upgrading-from-3x' },
+          { text: 'Upgrading from 4.x', link: 'https://github.com/SoloPHP/HTTP-Client/blob/main/CHANGELOG.md#upgrading-from-4x' },
         ],
       },
     ],
