@@ -5,14 +5,10 @@ declare(strict_types=1);
 namespace Solo\HttpClient;
 
 use GuzzleHttp\Client;
-use GuzzleHttp\Exception\BadResponseException;
-use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\ConnectTimeoutException;
 use GuzzleHttp\Exception\GuzzleException;
-use GuzzleHttp\Exception\NetworkException as GuzzleNetworkException;
 use GuzzleHttp\Exception\NetworkTimeoutException as GuzzleNetworkTimeoutException;
 use GuzzleHttp\Exception\ResponseTimeoutException as GuzzleResponseTimeoutException;
-use GuzzleHttp\Exception\ResponseTransferException;
 use GuzzleHttp\Exception\TransferException;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
@@ -27,20 +23,21 @@ use Psr\Http\Client\NetworkExceptionInterface;
 use Psr\Http\Client\RequestExceptionInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseInterface;
-use Psr\Http\Message\StreamInterface;
 use Psr\Http\Message\UriInterface;
-use Psr\Log\AbstractLogger;
 use Psr\Log\LoggerInterface;
 use Solo\HttpClient\Exception\HttpClientException;
 use Solo\HttpClient\Exception\NetworkException;
 use Solo\HttpClient\Exception\NetworkTimeoutException;
 use Solo\HttpClient\Exception\RequestException;
 use Solo\HttpClient\Exception\ResponseTimeoutException;
-use Solo\HttpClient\Internal\HeaderParam;
+use Solo\HttpClient\Internal\CallbackLogger;
+use Solo\HttpClient\Internal\Headers;
+use Solo\HttpClient\Internal\Multipart;
 use Solo\HttpClient\Internal\PublicHostGuard;
 use Solo\HttpClient\Internal\RedactingFormatter;
 use Solo\HttpClient\Internal\Redactor;
 use Solo\HttpClient\Internal\ResponseSizeLimit;
+use Solo\HttpClient\Internal\RetryPolicy;
 
 /**
  * Immutable: timeout(), retry() and with*() return a new instance and never change the current one.
@@ -50,10 +47,6 @@ use Solo\HttpClient\Internal\ResponseSizeLimit;
  */
 class HttpClient implements ClientInterface
 {
-    private const array IDEMPOTENT_METHODS = ['GET', 'HEAD', 'OPTIONS', 'TRACE', 'PUT', 'DELETE'];
-    /** The guzzlehttp/psr7 rule for header values */
-    private const string HEADER_VALUE_PATTERN = '/^[\x20\x09\x21-\x7E\x80-\xFF]*$/D';
-
     /** Built on first use; every clone starts without one, so a chain of with*() calls builds a single client. */
     private ?Client $client = null;
     /** @var array<string, mixed> */
@@ -182,7 +175,7 @@ class HttpClient implements ClientInterface
 
         $clone = clone $this;
         $clone->retryMiddleware = $maxRetries > 0
-            ? self::createRetryMiddleware($maxRetries, $delayMs, $maxDelayMs, $retryNonIdempotent)
+            ? RetryPolicy::middleware($maxRetries, $delayMs, $maxDelayMs, $retryNonIdempotent)
             : null;
         return $clone;
     }
@@ -194,7 +187,7 @@ class HttpClient implements ClientInterface
     public function withLogging(LoggerInterface|callable|null $logger = null): static
     {
         $clone = clone $this;
-        $clone->logger = $logger instanceof LoggerInterface ? $logger : self::callableLogger($logger);
+        $clone->logger = $logger instanceof LoggerInterface ? $logger : new CallbackLogger($logger);
         return $clone;
     }
 
@@ -262,7 +255,7 @@ class HttpClient implements ClientInterface
         #[\SensitiveParameter] string $uri,
         #[\SensitiveParameter] array $data
     ): HttpResponse {
-        return $this->request('POST', $uri, ['multipart' => self::multipartFields($data)]);
+        return $this->request('POST', $uri, ['multipart' => Multipart::fields($data)]);
     }
 
     /**
@@ -272,7 +265,7 @@ class HttpClient implements ClientInterface
         #[\SensitiveParameter] string $uri,
         #[\SensitiveParameter] array $data
     ): HttpResponse {
-        return $this->request('PUT', $uri, ['multipart' => self::multipartFields($data)]);
+        return $this->request('PUT', $uri, ['multipart' => Multipart::fields($data)]);
     }
 
     /**
@@ -282,7 +275,7 @@ class HttpClient implements ClientInterface
         #[\SensitiveParameter] string $uri,
         #[\SensitiveParameter] array $data
     ): HttpResponse {
-        return $this->request('PATCH', $uri, ['multipart' => self::multipartFields($data)]);
+        return $this->request('PATCH', $uri, ['multipart' => Multipart::fields($data)]);
     }
 
     /**
@@ -556,10 +549,10 @@ class HttpClient implements ClientInterface
     private function dispatch(callable $start, #[\SensitiveParameter] array $options): PromiseInterface
     {
         if (isset($options['headers']) && is_array($options['headers'])) {
-            self::assertRequestHeaders($options['headers']);
+            Headers::validate($options['headers']);
         }
         if (isset($options['multipart']) && is_array($options['multipart'])) {
-            $options['multipart'] = self::prepareMultipart($options['multipart']);
+            $options['multipart'] = Multipart::prepare($options['multipart']);
         }
 
         $redactions = $this->redactions;
@@ -612,8 +605,8 @@ class HttpClient implements ClientInterface
         $existing = $this->config['headers'] ?? [];
 
         foreach ($headers as $name => $value) {
-            $name = self::assertHeaderName((string) $name);
-            $values = self::assertHeaderValues($name, $value);
+            $name = (string) $name;
+            $values = Headers::values($name, $value);
             if (strcasecmp($name, 'Authorization') === 0) {
                 $this->authorization = $values;
                 $this->curlAuth = null;
@@ -733,247 +726,6 @@ class HttpClient implements ClientInterface
         };
     }
 
-    private static function createRetryMiddleware(
-        int $maxRetries,
-        int $baseDelay,
-        int $maxDelay,
-        bool $retryNonIdempotent
-    ): callable {
-        return Middleware::retry(
-            static function (
-                int $retries,
-                #[\SensitiveParameter] RequestInterface $request,
-                ?ResponseInterface $response = null,
-                mixed $exception = null
-            ) use (
-                $maxRetries,
-                $retryNonIdempotent
-            ): bool {
-                // A consumed non-seekable body cannot be replayed: a retry would send it empty.
-                if ($retries >= $maxRetries || !$request->getBody()->isSeekable()) {
-                    return false;
-                }
-
-                $idempotent = $retryNonIdempotent
-                    || in_array(strtoupper($request->getMethod()), self::IDEMPOTENT_METHODS, true);
-
-                // A status a handler reports as an exception is judged by the status. Other response-aware
-                // failures (a transfer broken after the headers) are judged as network errors below.
-                if ($response === null && $exception instanceof BadResponseException) {
-                    $response = $exception->getResponse();
-                }
-
-                if ($response !== null) {
-                    $status = $response->getStatusCode();
-                    // 429 means the request was rejected without processing.
-                    return $status === 429 || ($idempotent && $status >= 500);
-                }
-
-                if (!$exception instanceof \Throwable) {
-                    return false;
-                }
-
-                // Guzzle's ConnectException means the connection was never established (DNS, TCP connect,
-                // TLS setup, connect timeout): nothing was sent, so even POST and PATCH are safe to repeat.
-                if ($exception instanceof ConnectException) {
-                    return true;
-                }
-
-                // Any other failure without a response, or a response that broke off after its headers. A transfer
-                // that a callback, the sink or a response size limit stopped would only stop again.
-                return $idempotent && (
-                    $exception instanceof GuzzleNetworkException || $exception instanceof ResponseTransferException
-                );
-            },
-            static function (int $retries, ?ResponseInterface $response = null) use ($baseDelay, $maxDelay): int {
-                $retryAfter = $response !== null ? self::parseRetryAfter($response) : null;
-                if ($retryAfter !== null) {
-                    return min($retryAfter, $maxDelay);
-                }
-
-                $delay = (int) min($maxDelay, $baseDelay * 2 ** min($retries - 1, 30));
-                $delay += random_int(0, intdiv($delay, 10));
-
-                return min($delay, $maxDelay);
-            }
-        );
-    }
-
-    /**
-     * @return int|null Delay in milliseconds, or null when the header is absent or invalid
-     */
-    private static function parseRetryAfter(ResponseInterface $response): ?int
-    {
-        $value = trim($response->getHeaderLine('Retry-After'));
-        if ($value === '') {
-            return null;
-        }
-
-        if (preg_match('/^\d{1,10}$/', $value) === 1) {
-            return (int) $value * 1000;
-        }
-
-        // IMF-fixdate, e.g. "Wed, 21 Oct 2015 07:28:00 GMT"
-        $date = \DateTimeImmutable::createFromFormat('D, d M Y H:i:s \\G\\M\\T', $value, new \DateTimeZone('UTC'));
-        if ($date === false) {
-            return null;
-        }
-
-        return max(0, $date->getTimestamp() - time()) * 1000;
-    }
-
-    /**
-     * Flattens a field map ("tags" => ["a"] becomes "tags[0]") into multipart parts. No I/O happens here.
-     *
-     * @param array<array-key, mixed> $data
-     * @return list<array{name: string, contents: mixed}>
-     */
-    private static function multipartFields(#[\SensitiveParameter] array $data, string $prefix = ''): array
-    {
-        $fields = [];
-
-        foreach ($data as $key => $value) {
-            $name = $prefix === '' ? (string) $key : "{$prefix}[{$key}]";
-
-            if (is_array($value)) {
-                array_push($fields, ...self::multipartFields($value, $name));
-            } elseif (
-                $value instanceof File
-                || $value instanceof StreamInterface
-                || is_resource($value)
-                || is_scalar($value)
-                || $value === null
-            ) {
-                $fields[] = ['name' => $name, 'contents' => $value];
-            } elseif ($value instanceof \Stringable) {
-                $fields[] = ['name' => $name, 'contents' => (string) $value];
-            } else {
-                throw new \InvalidArgumentException(
-                    'Unsupported value for multipart field "' . HeaderParam::encode($name) . '": '
-                    . get_debug_type($value)
-                );
-            }
-        }
-
-        return $fields;
-    }
-
-    /**
-     * Applied to the "multipart" option of every request. Validates all parts before any File stream
-     * is opened, expands nested arrays, percent-encodes names and file names, and validates part headers.
-     *
-     * @param array<array-key, mixed> $parts
-     * @return list<array<string, mixed>>
-     */
-    private static function prepareMultipart(#[\SensitiveParameter] array $parts): array
-    {
-        /** @var list<array{name: string, contents: mixed, filename?: string, headers?: array<string, string>}> */
-        $fields = [];
-
-        foreach ($parts as $part) {
-            $name = is_array($part) ? ($part['name'] ?? null) : null;
-            if (!is_array($part) || !(is_string($name) || is_int($name)) || !array_key_exists('contents', $part)) {
-                throw new \InvalidArgumentException('Each multipart part needs a "name" and "contents"');
-            }
-
-            if (is_array($part['contents'])) {
-                if (isset($part['filename']) || isset($part['headers'])) {
-                    throw new \InvalidArgumentException('"filename" and "headers" cannot be used with array contents');
-                }
-                array_push($fields, ...self::multipartFields($part['contents'], (string) $name));
-                continue;
-            }
-
-            $field = ['name' => (string) $name, 'contents' => $part['contents']];
-            if (isset($part['filename'])) {
-                if (!is_string($part['filename'])) {
-                    throw new \InvalidArgumentException('Multipart "filename" must be a string');
-                }
-                $field['filename'] = $part['filename'];
-            }
-            if (isset($part['headers'])) {
-                if (!is_array($part['headers'])) {
-                    throw new \InvalidArgumentException('Multipart "headers" must be an array');
-                }
-                $field['headers'] = [];
-                foreach ($part['headers'] as $headerName => $value) {
-                    $headerName = self::assertHeaderName((string) $headerName);
-                    $field['headers'][$headerName] = implode(', ', self::assertHeaderValues($headerName, $value));
-                }
-            }
-            $fields[] = $field;
-        }
-
-        return array_map(
-            /** @param array{name: string, contents: mixed, filename?: string, headers?: array<string, string>} $part */
-            static function (array $part): array {
-                $file = $part['contents'];
-                if ($file instanceof File) {
-                    $part['contents'] = $file->openStream();
-                    $part['filename'] ??= $file->filename();
-                    if ($file->mimeType() !== null) {
-                        $part['headers'] = ['Content-Type' => $file->mimeType()] + ($part['headers'] ?? []);
-                    }
-                }
-
-                $part['name'] = HeaderParam::encode($part['name']);
-                if (isset($part['filename'])) {
-                    $part['filename'] = HeaderParam::encode($part['filename']);
-                }
-
-                return $part;
-            },
-            $fields
-        );
-    }
-
-    private static function assertHeaderName(string $name): string
-    {
-        if (preg_match('/^[a-zA-Z0-9\'`#$%&*+.^_|~!-]+$/D', $name) !== 1) {
-            throw new \InvalidArgumentException('Invalid header name');
-        }
-
-        return $name;
-    }
-
-    /**
-     * Validates values by the guzzlehttp/psr7 rule up front, so invalid values fail here
-     * instead of at request time, and the message never contains the (possibly secret) value.
-     *
-     * @return list<string>
-     */
-    private static function assertHeaderValues(string $name, #[\SensitiveParameter] mixed $value): array
-    {
-        $values = [];
-        foreach (is_array($value) ? $value : [$value] as $item) {
-            if (!is_string($item) || preg_match(self::HEADER_VALUE_PATTERN, $item) !== 1) {
-                throw new \InvalidArgumentException(
-                    "Header {$name} must be a string without control characters"
-                );
-            }
-            $values[] = $item;
-        }
-
-        if ($values === []) {
-            throw new \InvalidArgumentException("Header {$name} must not be empty");
-        }
-
-        return $values;
-    }
-
-    /**
-     * Per-request headers are passed to Guzzle as given, but are checked first by the same rule as
-     * withHeaders(), which is Guzzle's: Guzzle's own message could contain the invalid value, often a token.
-     *
-     * @param array<array-key, mixed> $headers
-     */
-    private static function assertRequestHeaders(#[\SensitiveParameter] array $headers): void
-    {
-        foreach ($headers as $name => $value) {
-            self::assertHeaderValues(self::assertHeaderName((string) $name), $value);
-        }
-    }
-
     /**
      * Transfer errors arrive already redacted by the "solo_redact" middleware; the message is redacted
      * again for the ones that never passed it (thrown before the request started, or left untouched
@@ -998,35 +750,6 @@ class HttpClient implements ClientInterface
             $e instanceof NetworkExceptionInterface => new NetworkException($e->getRequest(), $message, $code, $e),
             $e instanceof RequestExceptionInterface => new RequestException($e->getRequest(), $message, $code, $e),
             default => new HttpClientException($message, $code, $e),
-        };
-    }
-
-    private static function callableLogger(?callable $callback): LoggerInterface
-    {
-        return new class ($callback) extends AbstractLogger {
-            /** @var callable|null */
-            private $callback;
-
-            public function __construct(?callable $callback)
-            {
-                $this->callback = $callback;
-            }
-
-            /**
-             * @param mixed $level
-             * @param array<mixed> $context
-             */
-            #[\Override]
-            public function log($level, string|\Stringable $message, array $context = []): void
-            {
-                if ($this->callback === null) {
-                    $prefix = is_string($level) ? strtoupper($level) : 'INFO';
-                    error_log("[HttpClient] {$prefix}: {$message}");
-                    return;
-                }
-
-                ($this->callback)((string) $message);
-            }
         };
     }
 }

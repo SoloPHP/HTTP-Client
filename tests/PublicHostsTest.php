@@ -352,6 +352,31 @@ final class PublicHostsTest extends TestCase
         self::assertSame('tok3n.hooks.example', $e->getHost());
     }
 
+    public function testRegisteredHostSecretsStayOutOfTraceArguments(): void
+    {
+        $url = 'https://secret-token.hooks.example/';
+        $ignoreArgs = ini_set('zend.exception_ignore_args', '0');
+        try {
+            $refused = $this->guarded([], ['secret-token.hooks.example' => [['10.0.0.1']]])
+                ->withRedaction('secret-token');
+            $e = $this->refusal(static fn() => $refused->get($url));
+            self::assertStringNotContainsString('secret-token', self::traceArguments($e));
+
+            // A resolver that answers with something other than addresses fails inside the lookup.
+            $misresolved = $this->client([self::ok()], '')
+                ->withRedaction('secret-token')
+                ->withPublicHostsOnly(static fn(string $host): array => ['localhost']);
+            try {
+                $misresolved->get($url);
+                self::fail('The request was sent');
+            } catch (\UnexpectedValueException $e) {
+                self::assertStringNotContainsString('secret-token', self::traceArguments($e));
+            }
+        } finally {
+            ini_set('zend.exception_ignore_args', (string) $ignoreArgs);
+        }
+    }
+
     public function testResolverMustReturnIpAddresses(): void
     {
         $client = $this->client([self::ok()], '')->withPublicHostsOnly(static fn(string $host): array => ['localhost']);

@@ -213,8 +213,8 @@ public function __toString(): string
 | `ok()` | `true` for 200 only |
 | `clientError()` | `true` for 400 to 499 |
 | `serverError()` | `true` for 500 and above |
-| `body()`, `__toString()` | The whole body. A seekable body is read again on each call; a non-seekable body is read once and kept |
-| `json()` | The body decoded with associative arrays: an array, a scalar or `null`. Invalid JSON, including an empty body, gives `null`. The body is decoded once |
+| `body()`, `__toString()` | The whole body. A seekable body is read again on each call; a non-seekable body is read once and kept, and when that read fails, the same exception is thrown again on each later call |
+| `json()` | The body decoded with associative arrays: an array, a scalar or `null`. Invalid JSON, including an empty body, gives `null`. The body is decoded once; a failed read of the body throws, also on the next call, instead of giving `null` |
 | `json($key)` | The value at a dot-separated path, such as `'data.items.0.id'`, or `null` when a segment is missing or the body is not an array. A key that contains a dot is reached through `json()['a.b']` |
 | `header()` | The values of the header joined with `, `, matched in any letter case, or `null` when the header is absent |
 | `headers()` | All headers, as PSR-7 `getHeaders()` returns them |

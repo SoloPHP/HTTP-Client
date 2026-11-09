@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace Solo\HttpClient\Tests;
 
+use GuzzleHttp\Psr7\FnStream;
 use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\Psr7\Utils;
 use Psr\Http\Client\RequestExceptionInterface;
 use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\StreamInterface;
 use Solo\HttpClient\Exception\ResponseTooLargeException;
+use Solo\HttpClient\HttpResponse;
 
 /**
  * withMaxResponseSize(): a response larger than the limit is refused by its Content-Length, or once its body goes
@@ -120,15 +123,59 @@ final class ResponseSizeTest extends TestCase
 
     public function testStreamedBodyIsCountedAsItIsRead(): void
     {
-        $body = $this->client([new Response(200, [], self::BODY . 'x')])
-            ->withMaxResponseSize(10)
-            ->get('/file', ['stream' => true])
-            ->toPsrResponse()
-            ->getBody();
+        $body = $this->streamed(self::BODY . 'x')->toPsrResponse()->getBody();
 
         self::assertSame(self::BODY, $body->read(10));
         $this->expectException(ResponseTooLargeException::class);
         $body->read(10);
+    }
+
+    public function testSeekableStreamedBodyCanBeReadAgainWithinTheLimit(): void
+    {
+        $response = $this->streamed(self::BODY);
+
+        self::assertSame(self::BODY, $response->body());
+        self::assertSame(self::BODY, $response->body());
+    }
+
+    public function testSeekingInAStreamedBodyCountsItsPosition(): void
+    {
+        $body = $this->streamed(self::BODY . 'x')->toPsrResponse()->getBody();
+
+        $body->seek(9);
+        self::assertSame('9', $body->read(1));
+        $this->expectException(ResponseTooLargeException::class);
+        $body->read(1);
+    }
+
+    public function testStreamedBodyIsCountedFromItsPositionBeforeAndAfterASeek(): void
+    {
+        $source = Utils::streamFor(self::BODY . 'x');
+        $source->seek(5);
+        $body = $this->streamed($source)->toPsrResponse()->getBody();
+
+        self::assertSame('56789', $body->read(5));
+        $this->refusal(static fn() => $body->read(1));
+
+        $body->seek(5);
+        self::assertSame('56789', $body->read(5));
+        self::assertSame(10, $this->refusal(static fn() => $body->read(1))->getLimit());
+    }
+
+    public function testStreamedReadIsBoundedBeforeTheUnderlyingStreamAllocates(): void
+    {
+        $requested = null;
+        $source = Utils::streamFor(self::BODY . 'x');
+        $stream = FnStream::decorate($source, [
+            'read' => static function (int $length) use ($source, &$requested): string {
+                $requested = $length;
+                return $source->read(min($length, 11));
+            },
+        ]);
+        $body = $this->streamed($stream)->toPsrResponse()->getBody();
+
+        self::assertSame(10, $this->refusal(static fn() => $body->read(PHP_INT_MAX))->getLimit());
+        self::assertSame(11, $requested);
     }
 
     public function testAsynchronousRequestIsRejected(): void
@@ -152,6 +199,16 @@ final class ResponseSizeTest extends TestCase
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->client([])->withMaxResponseSize(-1);
+    }
+
+    /**
+     * A response with the stream option from a client limited to 10 bytes.
+     */
+    private function streamed(string|StreamInterface $body): HttpResponse
+    {
+        return $this->client([new Response(200, [], $body)])
+            ->withMaxResponseSize(10)
+            ->get('/file', ['stream' => true]);
     }
 
     private function refusal(callable $send): ResponseTooLargeException

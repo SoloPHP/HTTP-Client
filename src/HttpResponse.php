@@ -10,6 +10,8 @@ class HttpResponse
 {
     private readonly ResponseInterface $response;
     private ?string $body = null;
+    /** The failed read of a non-seekable body, thrown again instead of reading what is left */
+    private ?\Throwable $readFailure = null;
     private bool $jsonDecoded = false;
     private mixed $jsonData = null;
 
@@ -47,16 +49,27 @@ class HttpResponse
 
     /**
      * Seekable bodies are re-read on each call; only non-seekable ones (which can be read once)
-     * are cached, so large responses are not kept in memory twice.
+     * are cached, so large responses are not kept in memory twice. A non-seekable body that failed
+     * to read throws the same exception again: the bytes left after the failure are not the body.
      */
     public function body(): string
     {
         if ($this->body !== null) {
             return $this->body;
         }
+        if ($this->readFailure !== null) {
+            throw $this->readFailure;
+        }
 
         $stream = $this->response->getBody();
-        $contents = (string) $stream;
+        try {
+            $contents = (string) $stream;
+        } catch (\Throwable $e) {
+            if (!$stream->isSeekable()) {
+                $this->readFailure = $e;
+            }
+            throw $e;
+        }
         if (!$stream->isSeekable()) {
             $this->body = $contents;
         }
@@ -72,12 +85,12 @@ class HttpResponse
     public function json(?string $key = null): mixed
     {
         if (!$this->jsonDecoded) {
-            $this->jsonDecoded = true;
             try {
                 $this->jsonData = json_decode($this->body(), true, 512, JSON_THROW_ON_ERROR);
             } catch (\JsonException) {
                 // Invalid JSON stays null, so checks like `if ($response->json('allowed'))` fail closed.
             }
+            $this->jsonDecoded = true;
         }
 
         if ($key === null) {

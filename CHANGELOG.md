@@ -1,5 +1,18 @@
 # Changelog
 
+## 5.0.0-RC4
+
+### Fixed
+
+- **A body that failed to read is no longer taken for the body.** `HttpResponse::json()` does not cache `null` after
+  a failed read, and for a non-seekable body `body()` and `json()` throw the same exception again instead of
+  returning what was left after the failure.
+- **Streamed responses under `withMaxResponseSize()`** ask the body for at most one byte past the limit instead of
+  allocating the buffer the caller requested. The body is counted by its position, so seeking back and reading it
+  again within the limit is allowed.
+- **Registered secrets in host names stay out of stack traces**, also with `zend.exception_ignore_args` off: in a
+  refusal of `withPublicHostsOnly()`, and when its resolver answers with something other than IP addresses.
+
 ## 5.0.0-RC3
 
 ### Added

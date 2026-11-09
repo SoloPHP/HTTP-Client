@@ -76,7 +76,7 @@ final class PublicHostGuard
      *
      * @return list<string>
      */
-    public static function dns(string $host, mixed $family = null): array
+    public static function dns(#[\SensitiveParameter] string $host, mixed $family = null): array
     {
         $addresses = $family === 'v6' ? [] : self::records($host, \DNS_A, 'ip');
         if ($family === 'v4' || array_filter($addresses, IpAddress::isPublic(...)) !== []) {
@@ -89,7 +89,7 @@ final class PublicHostGuard
     /**
      * @return list<string>
      */
-    private static function records(string $host, int $type, string $field): array
+    private static function records(#[\SensitiveParameter] string $host, int $type, string $field): array
     {
         $addresses = [];
         $records = @dns_get_record($host, $type);
@@ -107,7 +107,7 @@ final class PublicHostGuard
      * @return list<string> Addresses in canonical form and in the resolver's order, narrowed to the family
      *     that force_ip_resolve asks for
      */
-    private static function resolve(?callable $resolver, string $host, mixed $family): array
+    private static function resolve(?callable $resolver, #[\SensitiveParameter] string $host, mixed $family): array
     {
         $resolved = $resolver === null ? self::dns($host, $family) : $resolver($host);
         if (!is_array($resolved)) {
@@ -137,9 +137,9 @@ final class PublicHostGuard
      */
     private static function refusal(
         #[\SensitiveParameter] RequestInterface $request,
-        string $host,
-        ?string $literal,
-        string $address,
+        #[\SensitiveParameter] string $host,
+        #[\SensitiveParameter] ?string $literal,
+        #[\SensitiveParameter] string $address,
         #[\SensitiveParameter] array $redactions
     ): BlockedHostException {
         $reason = match (true) {
