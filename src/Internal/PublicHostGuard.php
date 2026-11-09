@@ -21,10 +21,10 @@ use Solo\HttpClient\Exception\BlockedHostException;
 final class PublicHostGuard
 {
     /**
-     * @param callable(string): mixed $resolver
+     * @param (callable(string): mixed)|null $resolver null for DNS, see dns()
      * @param array<array-key, string> $redactions See Redactor::redactions()
      */
-    public static function middleware(callable $resolver, #[\SensitiveParameter] array $redactions): callable
+    public static function middleware(?callable $resolver, #[\SensitiveParameter] array $redactions): callable
     {
         return static fn(callable $handler): callable => static function (
             #[\SensitiveParameter] RequestInterface $request,
@@ -70,20 +70,32 @@ final class PublicHostGuard
     }
 
     /**
-     * The default resolver: the A and then the AAAA records of the host, asked from DNS. The hosts file is not
-     * read, and a failed lookup counts as no records.
+     * The default resolver: the A records of the host, asked from DNS, and the AAAA records only when no A record
+     * is public, since the first public address is the one used; with force_ip_resolve, only the family it names.
+     * The hosts file is not read, and a failed lookup counts as no records.
      *
      * @return list<string>
      */
-    public static function dns(string $host): array
+    public static function dns(string $host, mixed $family = null): array
+    {
+        $addresses = $family === 'v6' ? [] : self::records($host, \DNS_A, 'ip');
+        if ($family === 'v4' || array_filter($addresses, IpAddress::isPublic(...)) !== []) {
+            return $addresses;
+        }
+
+        return [...$addresses, ...self::records($host, \DNS_AAAA, 'ipv6')];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private static function records(string $host, int $type, string $field): array
     {
         $addresses = [];
-        foreach ([\DNS_A => 'ip', \DNS_AAAA => 'ipv6'] as $type => $field) {
-            $records = @dns_get_record($host, $type);
-            foreach (is_array($records) ? $records : [] as $record) {
-                if (is_string($record[$field] ?? null)) {
-                    $addresses[] = $record[$field];
-                }
+        $records = @dns_get_record($host, $type);
+        foreach (is_array($records) ? $records : [] as $record) {
+            if (is_string($record[$field] ?? null)) {
+                $addresses[] = $record[$field];
             }
         }
 
@@ -91,13 +103,13 @@ final class PublicHostGuard
     }
 
     /**
-     * @param callable(string): mixed $resolver
+     * @param (callable(string): mixed)|null $resolver
      * @return list<string> Addresses in canonical form and in the resolver's order, narrowed to the family
      *     that force_ip_resolve asks for
      */
-    private static function resolve(callable $resolver, string $host, mixed $family): array
+    private static function resolve(?callable $resolver, string $host, mixed $family): array
     {
-        $resolved = $resolver($host);
+        $resolved = $resolver === null ? self::dns($host, $family) : $resolver($host);
         if (!is_array($resolved)) {
             throw new \UnexpectedValueException('The host resolver must return a list of IP addresses');
         }

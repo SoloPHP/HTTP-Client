@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Solo\HttpClient\Tests;
 
 use GuzzleHttp\Exception\ConnectTimeoutException;
+use GuzzleHttp\Exception\RequestException as GuzzleRequestException;
+use GuzzleHttp\Exception\ResponseException;
 use GuzzleHttp\Exception\ResponseTimeoutException;
 use GuzzleHttp\Psr7\NoSeekStream;
 use GuzzleHttp\Psr7\Response;
@@ -178,6 +180,31 @@ final class RetryTest extends TestCase
             self::fail('Expected exception');
         } catch (RequestException) {
             self::assertCount(1, $this->sent);
+        }
+    }
+
+    /**
+     * A transfer that a callback or the sink stopped would stop again, and so would a request that Guzzle refuses.
+     */
+    public function testFailureThatIsNotANetworkErrorIsNotRetried(): void
+    {
+        $failures = [
+            'callback abort' => static fn(RequestInterface $r) => new ResponseException(
+                'The transfer was aborted by the progress callback',
+                $r,
+                new Response()
+            ),
+            'refused request' => static fn(RequestInterface $r) => new GuzzleRequestException('Unsupported scheme', $r),
+        ];
+
+        foreach ($failures as $name => $failure) {
+            $this->sent = [];
+            try {
+                $this->client([$failure, self::ok()])->retry(3)->get('/users');
+                self::fail("Expected exception: {$name}");
+            } catch (RequestException) {
+                self::assertCount(1, $this->sent, $name);
+            }
         }
     }
 

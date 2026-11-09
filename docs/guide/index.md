@@ -246,6 +246,27 @@ addresses. The restriction needs the cURL extension, and a request with the
 connection. [Public hosts only](details.md#public-hosts-only) lists the
 address ranges and the rules.
 
+Such a URL can also serve far more than you expect, and a few kilobytes of
+gzip can expand to gigabytes. `withMaxResponseSize()` refuses a response whose
+body is larger than the limit:
+
+```php
+use Solo\HttpClient\Exception\ResponseTooLargeException;
+
+$fetcher = $fetcher->withMaxResponseSize(10 * 1024 * 1024);
+
+try {
+    $fetcher->get($feedUrl, ['sink' => $path]);
+} catch (ResponseTooLargeException $e) {
+    $e->getLimit(); // 10485760
+}
+```
+
+A response that announces a larger `Content-Length` is refused as soon as its
+headers arrive. Otherwise the body is counted after decoding as it is written,
+and the sink never receives the bytes past the limit. The refusal is not
+retried. [Response size](details.md#response-size) gives the rules.
+
 ## Log requests
 
 ```php
@@ -302,20 +323,27 @@ Error statuses are responses. Exceptions mean that the transfer itself failed:
 | --- | --- |
 | No response: the host did not resolve, the connection failed, sending or receiving failed, or a timeout came before the response | `NetworkException`, a PSR-18 `NetworkExceptionInterface` |
 | Another transfer failure, such as too many redirects or a response that broke off | `RequestException`, a PSR-18 `RequestExceptionInterface` |
+| A timeout, before the response or after its headers | `NetworkTimeoutException` or `ResponseTimeoutException`, both `TimeoutException` |
 | After `withPublicHostsOnly()`, a host or a redirect target that is not a public address | `BlockedHostException`, a `RequestException`, before anything is sent to it |
-| Any other Guzzle error | `HttpClientException`, a PSR-18 `ClientExceptionInterface` |
+| After `withMaxResponseSize()`, a response larger than the limit | `ResponseTooLargeException`, a `RequestException` |
+| A URL that does not parse, or any other Guzzle error | `HttpClientException`, a PSR-18 `ClientExceptionInterface` |
 | An invalid header, unsupported multipart data, a missing file | `InvalidArgumentException`, before anything is sent |
 
-The first four live in `Solo\HttpClient\Exception`. `NetworkException` and
-`RequestException` extend `HttpClientException`, which extends
-`RuntimeException`.
+All but `InvalidArgumentException` live in `Solo\HttpClient\Exception`.
+`NetworkException` and `RequestException` extend `HttpClientException`, which
+extends `RuntimeException`. The timeouts are a `NetworkException` and a
+`RequestException`, so catch `TimeoutException` before them:
 
 ```php
 use Solo\HttpClient\Exception\HttpClientException;
 use Solo\HttpClient\Exception\NetworkException;
+use Solo\HttpClient\Exception\TimeoutException;
 
 try {
     $response = $api->get('users/42');
+} catch (TimeoutException $e) {
+    // before the response or after its headers: the API is too slow
+    throw new ServiceUnavailable('The users API timed out', previous: $e);
 } catch (NetworkException $e) {
     // no response: the API is unreachable
     throw new ServiceUnavailable('The users API is unreachable', previous: $e);

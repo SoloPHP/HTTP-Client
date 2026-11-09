@@ -7,12 +7,18 @@ namespace Solo\HttpClient;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\BadResponseException;
 use GuzzleHttp\Exception\ConnectException;
+use GuzzleHttp\Exception\ConnectTimeoutException;
 use GuzzleHttp\Exception\GuzzleException;
+use GuzzleHttp\Exception\NetworkException as GuzzleNetworkException;
+use GuzzleHttp\Exception\NetworkTimeoutException as GuzzleNetworkTimeoutException;
+use GuzzleHttp\Exception\ResponseTimeoutException as GuzzleResponseTimeoutException;
+use GuzzleHttp\Exception\ResponseTransferException;
 use GuzzleHttp\Exception\TransferException;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Promise\PromiseInterface;
+use GuzzleHttp\Psr7\Exception\MalformedUriException;
 use GuzzleHttp\Psr7\UriComparator;
 use GuzzleHttp\Psr7\Utils as Psr7Utils;
 use GuzzleHttp\Utils;
@@ -27,11 +33,14 @@ use Psr\Log\AbstractLogger;
 use Psr\Log\LoggerInterface;
 use Solo\HttpClient\Exception\HttpClientException;
 use Solo\HttpClient\Exception\NetworkException;
+use Solo\HttpClient\Exception\NetworkTimeoutException;
 use Solo\HttpClient\Exception\RequestException;
+use Solo\HttpClient\Exception\ResponseTimeoutException;
 use Solo\HttpClient\Internal\HeaderParam;
 use Solo\HttpClient\Internal\PublicHostGuard;
 use Solo\HttpClient\Internal\RedactingFormatter;
 use Solo\HttpClient\Internal\Redactor;
+use Solo\HttpClient\Internal\ResponseSizeLimit;
 
 /**
  * Immutable: timeout(), retry() and with*() return a new instance and never change the current one.
@@ -64,8 +73,11 @@ class HttpClient implements ClientInterface
     private ?LoggerInterface $logger = null;
     /** @var array<array-key, string> Secrets to mask in logs and exception messages, for strtr() */
     private array $redactions = [];
-    /** @var (callable(string): list<string>)|null Host resolver of withPublicHostsOnly(); null while it is off */
+    private bool $publicHostsOnly = false;
+    /** @var (callable(string): list<string>)|null Host resolver of withPublicHostsOnly(); null for DNS */
     private $hostResolver = null;
+    /** Limit of withMaxResponseSize() in bytes; null while it is off */
+    private ?int $maxResponseSize = null;
 
     /**
      * @param array<string, mixed> $config Guzzle options; a custom "handler" is honored
@@ -212,8 +224,8 @@ class HttpClient implements ClientInterface
      * redirect hop and every retry is checked, and the connection is pinned to the checked address with
      * CURLOPT_CONNECT_TO, so DNS rebinding cannot swap in another one. Requires the cURL extension.
      *
-     * @param (callable(string): list<string>)|null $resolver Returns the IP addresses of a host name;
-     *     by default its A and AAAA records from DNS
+     * @param (callable(string): list<string>)|null $resolver Returns the IP addresses of a host name; by default
+     *     its A records from DNS, and its AAAA records when no A record is public
      */
     public function withPublicHostsOnly(?callable $resolver = null): static
     {
@@ -222,7 +234,24 @@ class HttpClient implements ClientInterface
         }
 
         $clone = clone $this;
-        $clone->hostResolver = $resolver ?? PublicHostGuard::dns(...);
+        $clone->publicHostsOnly = true;
+        $clone->hostResolver = $resolver;
+        return $clone;
+    }
+
+    /**
+     * Refuses a response whose body is larger than $bytes with ResponseTooLargeException: by its Content-Length as
+     * soon as the headers arrive, otherwise once the body goes past the limit, counted after decoding. A refused
+     * response is not retried.
+     */
+    public function withMaxResponseSize(int $bytes): static
+    {
+        if ($bytes < 0) {
+            throw new \InvalidArgumentException('The response size limit must not be negative');
+        }
+
+        $clone = clone $this;
+        $clone->maxResponseSize = $bytes;
         return $clone;
     }
 
@@ -502,7 +531,12 @@ class HttpClient implements ClientInterface
             $stack->push(Middleware::log($this->logger, new RedactingFormatter($this->redactions)), 'solo_log');
         }
 
-        if ($this->hostResolver !== null) {
+        if ($this->maxResponseSize !== null) {
+            // Inside retries, so every attempt counts from zero, and a refusal reaches them as it is.
+            $stack->push(ResponseSizeLimit::middleware($this->maxResponseSize), 'solo_max_response_size');
+        }
+
+        if ($this->publicHostsOnly) {
             // Innermost layer: every attempt of every redirect hop is checked and pinned as it reaches the handler.
             $stack->push(PublicHostGuard::middleware($this->hostResolver, $this->redactions), 'solo_public_hosts');
         }
@@ -528,13 +562,20 @@ class HttpClient implements ClientInterface
             $options['multipart'] = self::prepareMultipart($options['multipart']);
         }
 
+        $redactions = $this->redactions;
+
         try {
             $promise = $start($this->client(), $options);
         } catch (GuzzleException $e) {
             $promise = Create::rejectionFor($e);
+        } catch (MalformedUriException $e) {
+            // A URL that does not parse is a failed request: URLs often come from users or from configuration.
+            $promise = Create::rejectionFor(new HttpClientException(
+                'HTTP request failed: ' . Redactor::message($e->getMessage(), $redactions),
+                0,
+                Redactor::exception($e, $redactions)
+            ));
         }
-
-        $redactions = $this->redactions;
 
         return $promise->then(
             static fn(mixed $result): mixed => $result instanceof ResponseInterface
@@ -734,7 +775,15 @@ class HttpClient implements ClientInterface
 
                 // Guzzle's ConnectException means the connection was never established (DNS, TCP connect,
                 // TLS setup, connect timeout): nothing was sent, so even POST and PATCH are safe to repeat.
-                return $idempotent || $exception instanceof ConnectException;
+                if ($exception instanceof ConnectException) {
+                    return true;
+                }
+
+                // Any other failure without a response, or a response that broke off after its headers. A transfer
+                // that a callback, the sink or a response size limit stopped would only stop again.
+                return $idempotent && (
+                    $exception instanceof GuzzleNetworkException || $exception instanceof ResponseTransferException
+                );
             },
             static function (int $retries, ?ResponseInterface $response = null) use ($baseDelay, $maxDelay): int {
                 $retryAfter = $response !== null ? self::parseRetryAfter($response) : null;
@@ -928,8 +977,9 @@ class HttpClient implements ClientInterface
     /**
      * Transfer errors arrive already redacted by the "solo_redact" middleware; the message is redacted
      * again for the ones that never passed it (thrown before the request started, or left untouched
-     * because of an unexpected constructor). The PSR-18 interfaces decide the class: Guzzle's
-     * NetworkException (no response) becomes NetworkException, its RequestException RequestException.
+     * because of an unexpected constructor). Guzzle's timeouts become the timeout classes; otherwise the PSR-18
+     * interfaces decide: Guzzle's NetworkException (no response) becomes NetworkException, its
+     * RequestException RequestException.
      *
      * @param array<array-key, string> $redactions
      */
@@ -941,6 +991,10 @@ class HttpClient implements ClientInterface
         $message = 'HTTP request failed: ' . Redactor::message($e->getMessage(), $redactions);
 
         return match (true) {
+            $e instanceof ConnectTimeoutException, $e instanceof GuzzleNetworkTimeoutException
+                => new NetworkTimeoutException($e->getRequest(), $message, $code, $e),
+            $e instanceof GuzzleResponseTimeoutException
+                => new ResponseTimeoutException($e->getRequest(), $message, $code, $e),
             $e instanceof NetworkExceptionInterface => new NetworkException($e->getRequest(), $message, $code, $e),
             $e instanceof RequestExceptionInterface => new RequestException($e->getRequest(), $message, $code, $e),
             default => new HttpClientException($message, $code, $e),

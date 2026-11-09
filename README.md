@@ -41,17 +41,20 @@ Webhooks, feed imports and image downloads request URLs that users supply, and s
 
 ```php
 use Solo\HttpClient\Exception\BlockedHostException;
+use Solo\HttpClient\Exception\ResponseTooLargeException;
 
-$fetcher = HttpClient::create()->timeout(10)->withPublicHostsOnly();
+$fetcher = HttpClient::create()->timeout(10)->withPublicHostsOnly()->withMaxResponseSize(10 * 1024 * 1024);
 
 try {
     $image = $fetcher->get($imageUrl)->body();
 } catch (BlockedHostException $e) {
     // nothing was sent: $e->getHost() is not a public address and does not resolve to one
+} catch (ResponseTooLargeException $e) {
+    // the image is larger than 10 MB
 }
 ```
 
-The client resolves the host itself and refuses it unless it is a public address or resolves to one. Every redirect hop and every retry is checked again, and the connection is pinned to the checked address, so a DNS answer that changes after the check (DNS rebinding) cannot send the request elsewhere.
+The client resolves the host itself and refuses it unless it is a public address or resolves to one. Every redirect hop and every retry is checked again, and the connection is pinned to the checked address, so a DNS answer that changes after the check (DNS rebinding) cannot send the request elsewhere. `withMaxResponseSize()` keeps such a URL from filling memory or disk: a larger response is cut off as soon as its size is known.
 
 ## Documentation
 

@@ -65,6 +65,7 @@ public function withMiddleware(callable $middleware, string $name = ''): static
 
 /** @param (callable(string): list<string>)|null $resolver */
 public function withPublicHostsOnly(?callable $resolver = null): static
+public function withMaxResponseSize(int $bytes): static
 ```
 
 Each method returns a new client and leaves the current one unchanged.
@@ -79,7 +80,8 @@ Each method returns a new client and leaves the current one unchanged.
 | `withLogging()` | Replaces the logger. A PSR-3 logger receives `info` for responses and `error` for failed transfers; a callable receives the line as its only argument; `null` writes `[HttpClient] INFO: <line>` or `[HttpClient] ERROR: <line>` with `error_log()` |
 | `withRedaction()` | Adds secrets to mask in log lines and exception messages, together with their URL-encoded forms. Empty strings are ignored |
 | `withMiddleware()` | Adds a [Guzzle middleware](https://docs.guzzlephp.org/en/stable/handlers-and-middleware.html). Middleware run in the order added, inside the credential and redirect layers and outside retries and logging |
-| `withPublicHostsOnly()` | Sends requests, redirect hops and retries only to public IP addresses, and pins each connection to the checked address with `CURLOPT_CONNECT_TO`; any other host throws `BlockedHostException` before anything is sent to it. `$resolver` receives a host name and returns its IP addresses as strings, an empty array when it does not resolve; by default they are the A and AAAA records from DNS. Throws `LogicException` without the cURL extension. [Public hosts only](details.md#public-hosts-only) gives the rules |
+| `withPublicHostsOnly()` | Sends requests, redirect hops and retries only to public IP addresses, and pins each connection to the checked address with `CURLOPT_CONNECT_TO`; any other host throws `BlockedHostException` before anything is sent to it. `$resolver` receives a host name and returns its IP addresses as strings, an empty array when it does not resolve; by default they are the A records from DNS, and the AAAA records when no A record is public. Throws `LogicException` without the cURL extension. [Public hosts only](details.md#public-hosts-only) gives the rules |
+| `withMaxResponseSize()` | Refuses a response whose body is larger than `$bytes` with `ResponseTooLargeException`: by its `Content-Length` as soon as the headers arrive, otherwise once the body goes past the limit, counted after decoding. The refusal is not retried. A negative limit throws `InvalidArgumentException`. [Response size](details.md#response-size) gives the rules |
 
 An invalid header name or value throws `InvalidArgumentException`. The message names the header, never the value.
 
@@ -250,18 +252,25 @@ Without a MIME type, Guzzle derives the part's `Content-Type` from the file name
 
 ```text
 RuntimeException
-└── HttpClientException              Psr\Http\Client\ClientExceptionInterface
-    └── RequestAwareException        abstract; getRequest()
-        ├── NetworkException         Psr\Http\Client\NetworkExceptionInterface
-        └── RequestException         Psr\Http\Client\RequestExceptionInterface
-            └── BlockedHostException getHost(), getAddress()
+└── HttpClientException                   Psr\Http\Client\ClientExceptionInterface
+    └── RequestAwareException             abstract; getRequest()
+        ├── NetworkException              Psr\Http\Client\NetworkExceptionInterface
+        │   └── NetworkTimeoutException   TimeoutException
+        └── RequestException              Psr\Http\Client\RequestExceptionInterface
+            ├── ResponseTimeoutException  TimeoutException
+            ├── BlockedHostException      getHost(), getAddress()
+            └── ResponseTooLargeException getLimit()
+
+TimeoutException                          interface, extends Psr\Http\Client\ClientExceptionInterface
 ```
 
 | Exception | Wraps |
 |---|---|
-| `NetworkException` | Guzzle's `NetworkException`, for failures without a response: `ConnectException` (DNS, TCP connect, TLS setup), `ConnectTimeoutException`, `NetworkTimeoutException`, and send and receive errors |
-| `RequestException` | Guzzle's `RequestException` and its `ResponseException` branch: `ResponseTransferException`, `ResponseTimeoutException`, `TooManyRedirectsException`, and `ClientException` or `ServerException` when a request sets `http_errors` |
-| `HttpClientException` | Any other `GuzzleException`, such as `HandlerClosedException` or Guzzle's `InvalidArgumentException` for an invalid option, and a promise rejected with a value that is not an exception |
+| `NetworkTimeoutException` | Guzzle's `ConnectTimeoutException` and `NetworkTimeoutException`: a timeout while connecting or before the response |
+| `NetworkException` | Guzzle's other `NetworkException`s, for failures without a response: `ConnectException` (DNS, TCP connect, TLS setup), and send and receive errors |
+| `ResponseTimeoutException` | Guzzle's `ResponseTimeoutException`: a timeout after the response headers, the response in `getPrevious()` |
+| `RequestException` | Guzzle's other `RequestException`s and its `ResponseException` branch: `ResponseTransferException`, `TooManyRedirectsException`, and `ClientException` or `ServerException` when a request sets `http_errors` |
+| `HttpClientException` | Any other `GuzzleException`, such as `HandlerClosedException` or Guzzle's `InvalidArgumentException` for an invalid option; Guzzle's `MalformedUriException` for a URL that does not parse; and a promise rejected with a value that is not an exception |
 
 - `getMessage()` is `HTTP request failed: ` followed by Guzzle's message, redacted.
 - `getCode()` is Guzzle's code.
@@ -285,6 +294,23 @@ A client restricted with `withPublicHostsOnly()` throws it, or rejects the promi
 - `getMessage()` names both, with registered secrets masked, such as `HTTP request refused: intranet.example.com resolves to 10.0.0.5, which is not a public address`.
 - `getCode()` is `0`, and there is no previous exception.
 
+### ResponseTooLargeException
+
+```php
+public function getLimit(): int
+```
+
+A client limited with `withMaxResponseSize()` throws it, or rejects the promise with it, when a response announces a larger `Content-Length` or its body goes past the limit. With the `stream` option, reading the body throws it. The refusal is not retried, and each attempt is logged.
+
+- `getLimit()` is the limit in bytes.
+- `getRequest()` returns the request whose response was refused: the redirect target when a redirect hop was too large.
+- `getMessage()` is `HTTP request failed: the response body exceeds the limit of 10485760 bytes`.
+- `getCode()` is `0`, and there is no previous exception.
+
+### TimeoutException
+
+An interface, extending `Psr\Http\Client\ClientExceptionInterface`, of `NetworkTimeoutException` and `ResponseTimeoutException`. Catch it before `NetworkException` and `RequestException` to handle a timeout on its own. cURL also times out a transfer slower than `CURLOPT_LOW_SPEED_LIMIT` for `CURLOPT_LOW_SPEED_TIME`.
+
 ## Log line
 
 ```text
@@ -302,10 +328,11 @@ The URI and the error message are redacted as described in [Redaction](details.m
 
 - HTTP error statuses are returned as responses unless a request sets `http_errors`.
 - Transfer failures throw the client's exceptions; invalid arguments throw `InvalidArgumentException` before any request is sent.
-- A URL that Guzzle cannot parse throws Guzzle's `MalformedUriException`, whose message contains the URL as written.
+- A URL that Guzzle cannot parse throws `HttpClientException`, or rejects the promise with it, with Guzzle's `MalformedUriException` in `getPrevious()`; both messages are redacted.
 - Stack traces hide the client's parameters that carry secrets. Arguments of your own functions, and of Guzzle's that it does not mark, stay visible unless `zend.exception_ignore_args` is on, as it is in `php.ini-production`.
 - `getRequest()` returns the request with all its headers, `Authorization` included. Do not serialize it into logs.
 - POST and PATCH are recognized as unsent through Guzzle's `ConnectException`. A custom handler must report connection failures with it for those retries to happen.
 - Digest and NTLM credentials set on the client need the cURL extension. A request's own `auth` option follows Guzzle 8, which implements Digest itself and has no NTLM.
 - `withPublicHostsOnly()` needs the cURL handler to pin connections. Guzzle's stream handler, which serves requests with the `stream` option, refuses restricted requests with an `HttpClientException`.
 - `withPublicHostsOnly()` resolves host names with a blocking DNS lookup, bounded by the system resolver's timeouts rather than the `timeout` option. An asynchronous request resolves its host when it starts.
+- `withMaxResponseSize()` counts the body that the handler writes to the `sink` option, which Guzzle's cURL and stream handlers and its `MockHandler` all do. A handler of your own that returns a body without writing the sink is checked by `Content-Length` only.

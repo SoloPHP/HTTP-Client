@@ -12,12 +12,16 @@ use GuzzleHttp\Exception\RequestException as GuzzleRequestException;
 use GuzzleHttp\Exception\ResponseTimeoutException;
 use GuzzleHttp\Exception\ServerException;
 use GuzzleHttp\Exception\TransferException;
+use GuzzleHttp\Psr7\Exception\MalformedUriException;
 use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Psr\Http\Message\RequestInterface;
 use Solo\HttpClient\Exception\HttpClientException;
 use Solo\HttpClient\Exception\NetworkException;
+use Solo\HttpClient\Exception\NetworkTimeoutException as ClientNetworkTimeoutException;
 use Solo\HttpClient\Exception\RequestException;
+use Solo\HttpClient\Exception\ResponseTimeoutException as ClientResponseTimeoutException;
+use Solo\HttpClient\Exception\TimeoutException;
 
 /**
  * The previous chain of the client's exceptions (the original Guzzle exception and nested errors) used to
@@ -87,15 +91,19 @@ final class ExceptionRedactionTest extends TestCase
 
         yield 'connect timeout' => [
             static fn(RequestInterface $r) => new ConnectTimeoutException($message($r), $r),
-            NetworkException::class,
+            ClientNetworkTimeoutException::class,
         ];
         yield 'network timeout' => [
             static fn(RequestInterface $r) => new NetworkTimeoutException($message($r), $r),
-            NetworkException::class,
+            ClientNetworkTimeoutException::class,
         ];
         yield 'response timeout' => [
             static fn(RequestInterface $r) => new ResponseTimeoutException($message($r), $r, new Response(200)),
-            RequestException::class,
+            ClientResponseTimeoutException::class,
+        ];
+        yield 'connect failure' => [
+            static fn(RequestInterface $r) => new ConnectException($message($r), $r),
+            NetworkException::class,
         ];
         yield 'request failure' => [
             static fn(RequestInterface $r) => new GuzzleRequestException($message($r), $r, 3),
@@ -137,6 +145,55 @@ final class ExceptionRedactionTest extends TestCase
             }
             self::assertNoSecrets($e);
         }
+    }
+
+    /**
+     * One catch for a timeout before the response and after its headers; each stays in its PSR-18 branch.
+     */
+    public function testTimeoutsShareTimeoutException(): void
+    {
+        $timeouts = [
+            ClientNetworkTimeoutException::class
+                => static fn(RequestInterface $r) => new ConnectTimeoutException('t', $r),
+            ClientResponseTimeoutException::class
+                => static fn(RequestInterface $r) => new ResponseTimeoutException('t', $r, new Response(200)),
+        ];
+
+        foreach ($timeouts as $class => $failure) {
+            try {
+                $this->client([$failure])->get('/slow');
+                self::fail('Expected exception');
+            } catch (TimeoutException $e) {
+                self::assertInstanceOf($class, $e);
+            }
+        }
+
+        self::assertTrue(is_subclass_of(ClientNetworkTimeoutException::class, NetworkException::class));
+        self::assertTrue(is_subclass_of(ClientResponseTimeoutException::class, RequestException::class));
+    }
+
+    public function testUrlThatDoesNotParseIsAFailedRequest(): void
+    {
+        $client = $this->client([self::ok()])->withRedaction('PATH-SECRET');
+
+        try {
+            $client->get('http://exa mple.test/PATH-SECRET/x');
+            self::fail('Expected exception');
+        } catch (HttpClientException $e) {
+            self::assertSame(HttpClientException::class, $e::class);
+            self::assertSame('HTTP request failed: Invalid host: exa mple.test', $e->getMessage());
+            self::assertInstanceOf(MalformedUriException::class, $e->getPrevious());
+        }
+
+        try {
+            $client->getAsync('http:///PATH-SECRET/x')->wait();
+            self::fail('Expected exception');
+        } catch (HttpClientException $e) {
+            self::assertSame(HttpClientException::class, $e::class);
+            self::assertNoSecrets($e);
+        }
+
+        self::assertSame([], $this->sent);
     }
 
     public function testExceptionWithNothingToHideIsKeptIntact(): void
