@@ -22,7 +22,7 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/' },
       { text: 'API', link: '/guide/api' },
       { text: 'Details', link: '/guide/details' },
-      { text: 'v5.0.0-RC2', link: 'https://github.com/SoloPHP/HTTP-Client/releases' },
+      { text: 'v5.0.0-RC3', link: 'https://github.com/SoloPHP/HTTP-Client/releases' },
     ],
 
     sidebar: [
