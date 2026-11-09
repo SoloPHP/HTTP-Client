@@ -1,6 +1,6 @@
 {
   "name": "solo-http-client-docs",
-  "version": "5.0.0-RC1",
+  "version": "5.0.0-RC2",
   "private": true,
   "type": "module",
   "description": "Documentation for Solo HTTP Client",
